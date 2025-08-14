@@ -1,9 +1,63 @@
-data/raw/
-data/processed/*.h5
-outputs/
+# ── Entornos / configuración local
+.venv/
+.env
+.env.*
+.conda/
+.python-version
+
+# ── Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyd
+*.so
+
+# ── Notebooks
 .ipynb_checkpoints/
-.DS_Store
+
+# ── IDE / SO
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Build / distribución
+build/
+dist/
+*.egg-info/
+
+# ── Logs / caches / cobertura
+*.log
+logs/
+.cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ── Datos y resultados (pesados)
+# Ignora TODO data/ y outputs/ pero permite dejar un marcador .gitkeep o README.md
+data/**
+!data/.gitkeep
+!data/README.md
+outputs/**
+!outputs/.gitkeep
+
+# ── Artefactos de modelos / datasets binarios
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+*.npz
+*.npy
+
+# ── Trackers de experimentos / tensorboard
+runs/
+lightning_logs/
+wandb/
+mlruns/
+
+# ── Checkpoints fuera de outputs/
+checkpoints/
