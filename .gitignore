@@ -1,0 +1,9 @@
+data/raw/
+data/processed/*.h5
+outputs/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+.idea/
