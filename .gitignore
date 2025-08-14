@@ -36,15 +36,37 @@ logs/
 .coverage.*
 htmlcov/
 
-# ── Datos y resultados (pesados)
-# Ignora TODO data/ y outputs/ pero permite dejar un marcador .gitkeep o README.md
+# ── Datos y resultados
+# Ignora TODO data/ y outputs/ por defecto...
 data/**
+outputs/**
+
+# ...pero permite subir marcadores y documentación mínimos:
 !data/.gitkeep
 !data/README.md
-outputs/**
 !outputs/.gitkeep
 
-# ── Artefactos de modelos / datasets binarios
+# ...y PERMITE subir SOLO los CSV de splits y tasks.json en processed:
+!data/processed/tasks.json
+!data/processed/**/train.csv
+!data/processed/**/val.csv
+!data/processed/**/test.csv
+# (Opcional) descomenta si quieres versionar también el CSV canónico normalizado
+#!data/processed/**/canonical.csv
+
+# Asegura que binarios pesados siguen ignorados aunque estén en processed
+data/**/*.[Hh]5
+data/**/*.[Nn][Pp][Zz]
+data/**/*.[Nn][Pp][Yy]
+data/**/*.[Pp][Tt]
+data/**/*.[Pp][Tt][Hh]
+data/**/*.onnx
+data/**/*.[Jj][Pp][Gg]
+data/**/*.[Jj][Pp][Ee][Gg]
+data/**/*.[Pp][Nn][Gg]
+data/**/*.[Mm][Pp]4
+
+# ── Artefactos de modelos fuera de data/
 *.pt
 *.pth
 *.ckpt
