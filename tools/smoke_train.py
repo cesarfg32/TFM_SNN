@@ -9,6 +9,15 @@ Uso:
   python tools/smoke_train.py --steps 50 --T 10 --batch 8 --amp --seed 42
 """
 from __future__ import annotations
+
+# --- NUEVO: asegurar que la raíz del repo está en sys.path ---
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# -------------------------------------------------------------
+
 import argparse, time
 import torch
 from torch import nn, optim
@@ -37,7 +46,6 @@ def main():
 
     # Datos sintéticos: (B,T,C,H,W) -> SNNVisionRegressor espera (T,B,C,H,W)
     B, T, C, H, W = args.batch, args.T, 1, 80, 160
-    # Creamos datos de forma on-the-fly dentro del bucle para gastar poca RAM
 
     loss_fn = nn.MSELoss()
     opt = optim.Adam(model.parameters(), lr=1e-3)
