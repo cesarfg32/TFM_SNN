@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import json, time
+import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,16 @@ from .utils import set_seeds  # para reproducibilidad global
 
 
 # ---------------------------------------------------------------------
+# Acelerar FP32 en GPUs Ampere/Ada con TF32 (sin cambiar tu código)
+# Recomendado para entreno: suele ofrecer un boost notable con
+# impacto mínimo en precisión FP32.
+# ---------------------------------------------------------------------
+torch.set_float32_matmul_precision("high")
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+
+# ---------------------------------------------------------------------
 # Configuración de entrenamiento
 # ---------------------------------------------------------------------
 @dataclass
@@ -24,7 +35,7 @@ class TrainConfig:
     batch_size: int = 8
     lr: float = 1e-3
     amp: bool = True
-    seed: Optional[int] = None  # NUEVO: si se indica, fija reproducibilidad
+    seed: Optional[int] = None  # si se indica, fija reproducibilidad
 
 
 # ---------------------------------------------------------------------
@@ -75,37 +86,54 @@ def train_supervised(
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         running = 0.0
+
         for x, y in tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.epochs}", leave=False):
-            x = _permute_if_needed(x.to(device))
-            y = y.to(device)
+            # Importante:
+            # - Primero permutamos (B,T,...) -> (T,B,...) si hace falta
+            # - Luego transferimos a GPU con non_blocking=True para solapar
+            #   transferencias con cómputo (requiere pin_memory=True en DataLoader)
+            x = _permute_if_needed(x).to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
+
             with autocast(device_type=device_type, enabled=use_amp):
                 y_hat = model(x)
                 loss = loss_fn(y_hat, y)
                 if method is not None:
-                    # Penalización EWC u otros métodos
+                    # Penalización EWC u otros métodos de CL
                     loss = loss + method.penalty()
 
             if use_amp:
                 scaler.scale(loss).backward()
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(opt)
                 scaler.update()
             else:
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
+
+            # if use_amp:
+            #     scaler.scale(loss).backward()
+            #     scaler.step(opt)
+            #     scaler.update()
+            # else:
+            #     loss.backward()
+            #     opt.step()
 
             running += loss.item()
 
         train_loss = running / max(1, len(train_loader))
 
-        # Validación simple (opcional). Si no necesitas val, puedes omitir esto.
+        # Validación (puedes omitirla si no la necesitas)
         model.eval()
         v_running = 0.0
         with torch.no_grad():
             for x, y in val_loader:
-                x = _permute_if_needed(x.to(device))
-                y = y.to(device)
+                x = _permute_if_needed(x).to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
                 with autocast(device_type=device_type, enabled=use_amp):
                     y_hat = model(x)
                     v_loss = loss_fn(y_hat, y)
@@ -117,7 +145,7 @@ def train_supervised(
 
     elapsed = time.time() - t0
 
-    # Manifest con metadatos de ejecución (útil para tablas de resultados)
+    # Manifest con metadatos de ejecución (útil para trazabilidad)
     manifest = {
         "epochs": cfg.epochs,
         "batch_size": cfg.batch_size,

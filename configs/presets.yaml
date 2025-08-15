@@ -1,22 +1,24 @@
 fast:
   epochs: 2
-  batch_size: 8
+  batch_size: 32        # ↑ antes 16
   T: 10
   gain: 0.5
   encoder: rate
   lr: 1.0e-3
   amp: true
+
 std:
   epochs: 8
-  batch_size: 16
+  batch_size: 48        # ↑ antes 32 (si OOM, baja a 32 o 40)
   T: 20
   gain: 0.5
   encoder: rate
-  lr: 1.0e-3
+  lr: 7.5e-4    # antes 1e-3
   amp: true
+
 accurate:
   epochs: 20
-  batch_size: 16
+  batch_size: 16        # T=30 es pesado; mantenlo prudente (puedes probar 20)
   T: 30
   gain: 0.5
   encoder: rate
