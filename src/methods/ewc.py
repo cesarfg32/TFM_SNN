@@ -1,80 +1,114 @@
 # src/methods/ewc.py
+# -*- coding: utf-8 -*-
+"""
+EWC (Elastic Weight Consolidation) para mitigar el olvido catastrófico.
+
+Cambios clave:
+- estimate_fisher() ahora pone el modelo en eval() durante la estimación y
+  vuelve a train() al final (dropout/bn desactivados mientras se estima).
+- Se asegura la permutación (B,T,C,H,W) -> (T,B,C,H,W) antes del forward,
+  igual que en training.py.
+- No usa AMP en la estimación del Fisher (evitamos ruido numérico).
+"""
+
+from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, Iterable
-import torch, torch.nn as nn
+import torch
+from torch import nn
+
+# Importamos el helper de permutación desde training para no duplicar lógica
+try:
+    from src.training import _permute_if_needed
+except Exception:
+    # Fallback por si se usa este módulo de forma aislada
+    def _permute_if_needed(x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 5 and x.shape[0] != x.shape[1]:
+            return x.permute(1, 0, 2, 3, 4).contiguous()
+        return x
+
 
 @dataclass
 class EWCConfig:
-    lambd: float = 1e10
-    fisher_batches: int = 25
+    """Hiperaparámetros de EWC."""
+    lambd: float = 0.0           # intensidad de la penalización
+    fisher_batches: int = 25     # nº de batches para estimar el Fisher (media de grad^2)
+
 
 class EWC:
-    def __init__(self, model: nn.Module, config: EWCConfig):
+    """
+    Implementación sencilla de EWC con Fisher diagonal.
+    - penalty(): devuelve el término de regularización λ * Σ F_i (θ_i - θ*_i)^2
+    - estimate_fisher(): estima F_i como la media del gradiente al cuadrado en 'fisher_batches' minibatches
+    """
+
+    def __init__(self, model: nn.Module, cfg: EWCConfig):
         self.model = model
-        self.cfg = config
-        self.fisher: Dict[str, torch.Tensor] = {}
-        self.theta_old: Dict[str, torch.Tensor] = {}
+        self.cfg = cfg
+        self._fisher: dict[str, torch.Tensor] = {}
+        self._mu: dict[str, torch.Tensor] = {}  # copia de parámetros tras consolidar cada tarea
 
     @torch.no_grad()
-    def _save_theta(self):
-        self.theta_old = {
-            n: p.detach().clone()
-            for n, p in self.model.named_parameters()
-            if p.requires_grad
-        }
+    def _snapshot_params(self) -> dict[str, torch.Tensor]:
+        """Copia de los parámetros actuales (θ*)."""
+        return {n: p.detach().clone() for n, p in self.model.named_parameters() if p.requires_grad}
 
-    @staticmethod
-    def _to_model_shape(x: torch.Tensor) -> torch.Tensor:
-        """Convierte (B,T,C,H,W) -> (T,B,C,H,W) si aplica."""
-        return x.permute(1, 0, 2, 3, 4).contiguous() if x.dim() == 5 else x
+    def estimate_fisher(self, loader, loss_fn: nn.Module, device: torch.device) -> None:
+        """
+        Estima el Fisher diagonal promediando grad^2 en 'fisher_batches' minibatches del loader dado.
+        - Modo eval() para desactivar dropout/bn durante la estimación.
+        - Sin autocast/AMP para mayor estabilidad numérica en la medida.
+        """
+        # Pasamos a eval y guardamos el estado previo para restaurarlo al final
+        was_training = self.model.training
+        self.model.eval()
 
-    def estimate_fisher(self, loader: Iterable, loss_fn: nn.Module, device: torch.device):
-        # Inicializa el diccionario de Fisher
-        self.fisher = {
-            n: torch.zeros_like(p, device=device)
-            for n, p in self.model.named_parameters()
-            if p.requires_grad
-        }
+        # Inicializa tensores del mismo tamaño que cada parámetro
+        fisher = {n: torch.zeros_like(p, device=p.device) for n, p in self.model.named_parameters()
+                  if p.requires_grad}
+        self._mu = self._snapshot_params()
 
-        self.model.train(False)
         n_batches = 0
+        for x, y in loader:
+            x = _permute_if_needed(x.to(device, non_blocking=True))
+            y = y.to(device, non_blocking=True)
 
-        for i, (x, y) in enumerate(loader):
-            if n_batches >= self.cfg.fisher_batches:
-                break
-
-            x = x.to(device)
-            y = y.to(device)
-            x = self._to_model_shape(x)  # <-- ¡Permute aquí!
-
+            # Necesitamos grad para acumular grad^2 → sin torch.no_grad()
             self.model.zero_grad(set_to_none=True)
             y_hat = self.model(x)
             loss = loss_fn(y_hat, y)
-            loss.backward()
+            loss.backward()  # acumula gradientes
 
+            # Acumular grad^2 en cada parámetro
             with torch.no_grad():
-                for (n, p) in self.model.named_parameters():
-                    if p.grad is None or not p.requires_grad:
-                        continue
-                    self.fisher[n] += p.grad.detach() ** 2
+                for n, p in self.model.named_parameters():
+                    if p.requires_grad and p.grad is not None:
+                        fisher[n] += p.grad.detach().pow(2)
 
             n_batches += 1
+            if n_batches >= int(self.cfg.fisher_batches):
+                break
 
-        if n_batches > 0:
-            for n in self.fisher:
-                self.fisher[n] /= float(n_batches)
+        # Media
+        denom = max(1, n_batches)
+        for n in fisher:
+            fisher[n] /= denom
 
-        self._save_theta()
+        # Guardamos la estimación consolidada
+        self._fisher = {n: f.detach().clone() for n, f in fisher.items()}
+
+        # Restaurar modo entrenamiento si estaba así
+        if was_training:
+            self.model.train()
 
     def penalty(self) -> torch.Tensor:
-        if not self.fisher or not self.theta_old:
-            return torch.tensor(0.0, device=next(self.model.parameters()).device)
+        """λ * Σ F_i (θ_i - θ*_i)^2. Si no hay Fisher estimado, devuelve 0."""
+        if not self._fisher:
+            # Devolvemos un 0 en el mismo device, con grad para no romper backward
+            return next(self.model.parameters()).sum() * 0.0
 
-        loss_ewc = 0.0
-        for (n, p) in self.model.named_parameters():
-            if n not in self.fisher or n not in self.theta_old or not p.requires_grad:
-                continue
-            loss_ewc = loss_ewc + 0.5 * self.cfg.lambd * torch.sum(
-                self.fisher[n] * (p - self.theta_old[n]) ** 2
-            )
-        return loss_ewc
+        reg = 0.0
+        for n, p in self.model.named_parameters():
+            if p.requires_grad and n in self._fisher:
+                reg = reg + (self._fisher[n] * (p - self._mu[n]).pow(2)).sum()
+
+        return self.cfg.lambd * reg

@@ -1,9 +1,7 @@
 # src/training.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
-import json
-import time
+import json, time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -13,17 +11,7 @@ from torch import nn, optim
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-from .utils import set_seeds  # para reproducibilidad global
-
-
-# ---------------------------------------------------------------------
-# Acelerar FP32 en GPUs Ampere/Ada con TF32 (sin cambiar tu código)
-# Recomendado para entreno: suele ofrecer un boost notable con
-# impacto mínimo en precisión FP32.
-# ---------------------------------------------------------------------
-torch.set_float32_matmul_precision("high")
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+from .utils import set_seeds  # reproducibilidad global
 
 
 # ---------------------------------------------------------------------
@@ -76,8 +64,7 @@ def train_supervised(
     opt = optim.Adam(model.parameters(), lr=cfg.lr)
 
     # AMP moderna (torch.amp). Solo activa en CUDA.
-    device_type = "cuda" if torch.cuda.is_available() else "cpu"
-    use_amp = bool(cfg.amp and device_type == "cuda")
+    use_amp = bool(cfg.amp and torch.cuda.is_available())
     scaler = GradScaler(enabled=use_amp)
 
     history = {"train_loss": [], "val_loss": []}
@@ -88,24 +75,24 @@ def train_supervised(
         running = 0.0
 
         for x, y in tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.epochs}", leave=False):
-            # Importante:
-            # - Primero permutamos (B,T,...) -> (T,B,...) si hace falta
-            # - Luego transferimos a GPU con non_blocking=True para solapar
-            #   transferencias con cómputo (requiere pin_memory=True en DataLoader)
+            # A GPU y en el formato que espera el modelo
             x = _permute_if_needed(x).to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
 
-            with autocast(device_type=device_type, enabled=use_amp):
+            # Forward + pérdida (EWC si procede)
+            # Nota: en autocast indicamos 'cuda' explícitamente para PyTorch 2.x
+            with autocast("cuda", enabled=use_amp):
                 y_hat = model(x)
                 loss = loss_fn(y_hat, y)
                 if method is not None:
-                    # Penalización EWC u otros métodos de CL
                     loss = loss + method.penalty()
 
+            # Backward + CLIP GRADIENTS + step
             if use_amp:
                 scaler.scale(loss).backward()
+                # Desescalar antes de hacer clipping
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(opt)
@@ -115,26 +102,18 @@ def train_supervised(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
 
-            # if use_amp:
-            #     scaler.scale(loss).backward()
-            #     scaler.step(opt)
-            #     scaler.update()
-            # else:
-            #     loss.backward()
-            #     opt.step()
-
             running += loss.item()
 
         train_loss = running / max(1, len(train_loader))
 
-        # Validación (puedes omitirla si no la necesitas)
+        # Validación simple
         model.eval()
         v_running = 0.0
         with torch.no_grad():
             for x, y in val_loader:
                 x = _permute_if_needed(x).to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True)
-                with autocast(device_type=device_type, enabled=use_amp):
+                with autocast("cuda", enabled=use_amp):
                     y_hat = model(x)
                     v_loss = loss_fn(y_hat, y)
                 v_running += v_loss.item()
@@ -145,7 +124,7 @@ def train_supervised(
 
     elapsed = time.time() - t0
 
-    # Manifest con metadatos de ejecución (útil para trazabilidad)
+    # Manifest con metadatos de ejecución (útil para tablas de resultados)
     manifest = {
         "epochs": cfg.epochs,
         "batch_size": cfg.batch_size,
