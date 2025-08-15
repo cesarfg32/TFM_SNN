@@ -1,104 +1,78 @@
-#!/usr/bin/env python
+# tools/smoke_train.py
 # -*- coding: utf-8 -*-
-"""Smoke test de entrenamiento sin datos reales (AMP moderno con torch.amp).
-
-- Genera un dataset sintético (spikes rate) con una etiqueta correlacionada.
-- Carga el SNN del proyecto y ejecuta un minibucle de entrenamiento (pocas steps).
-- Útil para validar el stack (PyTorch, snnTorch, AMP, GPU) sin depender del dataset.
+"""
+Smoke test de entrenamiento sintético:
+- Verifica forward, backward y AMP en tu GPU.
+- Útil para depurar instalación sin tocar datasets reales.
 
 Uso:
-  python tools/smoke_train.py --steps 50 --T 10 --H 80 --W 160 --batch 8 --amp
+  python tools/smoke_train.py --steps 50 --T 10 --batch 8 --amp --seed 42
 """
-import argparse
-import time
-import sys
-from pathlib import Path
-
+from __future__ import annotations
+import argparse, time
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torch.amp import GradScaler, autocast  # API moderna de AMP
+from torch import nn, optim
+from torch.amp import autocast, GradScaler
 
-# Asegura que podemos importar src/...
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT))
-
-from src.models import SNNVisionRegressor  # backbone del proyecto
-
-
-class DummySpikesDataset(Dataset):
-    """Dataset sintético: genera spikes (T,1,H,W) ~ Bernoulli(p)
-       y un target y = k * mean(x) + ruido, para que el modelo pueda aprender algo.
-    """
-    def __init__(self, n=128, T=10, H=80, W=160, p=0.1, noise=0.05, seed=42):
-        g = torch.Generator().manual_seed(seed)
-        # X shape: (n, T, 1, H, W)
-        self.X = (torch.rand((n, T, 1, H, W), generator=g) < p).float()
-        # Etiqueta con correlación simple respecto a la media de spikes
-        m = self.X.mean(dim=(1, 2, 3, 4))  # (n,)
-        self.y = (0.5 * m + noise * torch.randn(n, generator=g)).unsqueeze(1).float()
-
-    def __len__(self):
-        return self.X.shape[0]
-
-    def __getitem__(self, i):
-        return self.X[i], self.y[i]
+from src.models import SNNVisionRegressor
+from src.utils import set_seeds
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--steps", type=int, default=50, help="nº de iteraciones (batches) a entrenar")
-    ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--T", type=int, default=10)
-    ap.add_argument("--H", type=int, default=80)
-    ap.add_argument("--W", type=int, default=160)
-    ap.add_argument("--p", type=float, default=0.1, help="densidad de spikes (rate)")
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--amp", action="store_true", help="usar mixed precision si hay CUDA")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--steps", type=int, default=50, help="Iteraciones de entrenamiento")
+    parser.add_argument("--T", type=int, default=10, help="Ventana temporal (timesteps)")
+    parser.add_argument("--batch", type=int, default=8, help="Tamaño de batch")
+    parser.add_argument("--amp", action="store_true", help="Activar AMP (float16) en CUDA")
+    parser.add_argument("--seed", type=int, default=42, help="Semilla global para reproducibilidad")
+    args = parser.parse_args()
 
-    use_cuda = torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
-    print(f"Dispositivo: {device}")
+    set_seeds(args.seed)
 
-    # Dataset + loader (sintético, sin datos reales)
-    ds = DummySpikesDataset(n=args.steps * args.batch, T=args.T, H=args.H, W=args.W, p=args.p)
-    dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=0)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Dispositivo:", device.type)
 
-    # Modelo
+    # Modelo simple (entrada sintética de 1 canal)
     model = SNNVisionRegressor(in_channels=1, lif_beta=0.95).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    # AMP: en tu build, GradScaler acepta el device como primer argumento posicional
-    scaler = GradScaler("cuda", enabled=args.amp and use_cuda) if use_cuda else GradScaler(enabled=False)
-    loss_fn = torch.nn.MSELoss()
+    # Datos sintéticos: (B,T,C,H,W) -> SNNVisionRegressor espera (T,B,C,H,W)
+    B, T, C, H, W = args.batch, args.T, 1, 80, 160
+    # Creamos datos de forma on-the-fly dentro del bucle para gastar poca RAM
+
+    loss_fn = nn.MSELoss()
+    opt = optim.Adam(model.parameters(), lr=1e-3)
+
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    use_amp = bool(args.amp and device_type == "cuda")
+    scaler = GradScaler(enabled=use_amp)
 
     t0 = time.time()
-    model.train(True)
-    it = 0
-    for x, y in dl:
-        # DataLoader entrega (B, T, 1, H, W) → el modelo espera (T, B, C, H, W)
-        x = x.to(device).permute(1, 0, 2, 3, 4).contiguous()  # (T,B,C,H,W)
-        y = y.to(device)  # (B,1)
+    for i in range(1, args.steps + 1):
+        # Batch sintético determinista para reproducibilidad
+        x = torch.randn(B, T, C, H, W, device=device)
+        y = torch.randn(B, 1, device=device) * 0.1
+
+        # (B,T,C,H,W) -> (T,B,C,H,W)
+        x = x.permute(1, 0, 2, 3, 4).contiguous()
 
         opt.zero_grad(set_to_none=True)
-        # autocast también con primer argumento posicional 'cuda'
-        ctx = autocast("cuda", enabled=args.amp and use_cuda) if use_cuda else torch.no_grad()
-        with ctx:
+        with autocast(device_type=device_type, enabled=use_amp):
             y_hat = model(x)
             loss = loss_fn(y_hat, y)
 
-        scaler.scale(loss).backward()
-        scaler.step(opt)
-        scaler.update()
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+        else:
+            loss.backward()
+            opt.step()
 
-        it += 1
-        if it % 10 == 0:
-            print(f"Iter {it}/{args.steps} - loss {float(loss.detach().cpu()):.6f}")
-        if it >= args.steps:
-            break
+        if i % 10 == 0 or i == args.steps:
+            print(f"Iter {i}/{args.steps} - loss {loss.item():.6f}")
 
-    dt = time.time() - t0
-    print(f"OK: entrenamiento sintético completado en {dt:.2f}s, última loss={float(loss.detach().cpu()):.6f}")
+    elapsed = time.time() - t0
+    print(f"OK: entrenamiento sintético completado en {elapsed:.2f}s, última loss={loss.item():.6f}")
 
 
 if __name__ == "__main__":
