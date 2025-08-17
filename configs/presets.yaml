@@ -13,8 +13,8 @@ std:
   T: 16
   gain: 0.5
   encoder: rate
-  lr: 7.5e-4         # mantenlo; si subes a 64 y va estable, puedes probar 9e-4
-  amp: true
+  lr: 5.0e-4         # ↓ antes 7.5e-4
+  amp: false
 
 accurate:
   epochs: 20
