@@ -3,26 +3,46 @@
 """
 Datasets y transformaciones para el TFM (Udacity → SNN).
 
+Novedades:
+- Ruta rápida con OpenCV para decodificar/resize (más veloz).
+- Fallback a PIL si no hay OpenCV o falla la lectura.
+- Augmentación opcional (flip con corrección, brillo, gamma, ruido).
+- **Respeto estricto de `to_gray`**: si el transform va en gris ⇒ 1 canal; si va en color ⇒ 3 canales.
+
 Puntos clave:
-- Carga CSVs del simulador Udacity (center/left/right o un único 'path'/'image').
-- Preprocesa imágenes (recorte opcional, redimensionado, escala [0,1], gris opcional).
+- Lee CSVs (center/left/right o path/image) del simulador Udacity.
+- Preprocesa imágenes (crop top opcional, resize, normalización [0,1], gris opcional).
 - Codifica a impulsos on-the-fly:
-    - 'rate': Bernoulli por píxel con probabilidad ~ intensidad * gain
-    - 'latency': 1 único impulso; cuanto más brillante, más temprano (menor t)
-- Devuelve tensores con forma (T, 1, H, W) para que el DataLoader entregue (B, T, 1, H, W).
-  En el entrenamiento, permutamos a (T, B, 1, H, W) antes de entrar al modelo.
+    - 'rate': Bernoulli por píxel ~ intensidad*gain
+    - 'latency': 1 spike; más brillo ⇒ antes (t menor)
+- Devuelve tensores (T, C, H, W). C=1 si gris, C=3 si color.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
+import random
 
-import cv2
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+
+# ---- OpenCV rápido si existe; si no, fallback a PIL ----
+try:
+    import cv2
+    _HAS_CV2 = True
+    try:
+        # Evita sobre-subscription de hilos en cv2 cuando usas múltiples workers
+        cv2.setNumThreads(0)
+    except Exception:
+        pass
+except Exception:
+    cv2 = None
+    _HAS_CV2 = False
+
+from PIL import Image
 
 
 # -----------------------------
@@ -32,11 +52,10 @@ class ImageTransform:
     """Transformación mínima para imágenes de Udacity.
 
     Args:
-        w (int): ancho de destino (por ejemplo, 160).
-        h (int): alto de destino (por ejemplo, 80).
-        to_gray (bool): si True, convierte a escala de grises (canal único).
-        crop_top (Optional[int]): si se indica, recorta 'crop_top' píxeles de la parte superior
-                                  antes de redimensionar (útil para eliminar cielo/HUD).
+        w (int): ancho destino (p. ej. 160).
+        h (int): alto destino (p. ej. 80).
+        to_gray (bool): si True, salida en escala de grises (1 canal); si False, RGB (3 canales).
+        crop_top (Optional[int]): recorta 'crop_top' px por arriba antes del resize.
     """
 
     def __init__(self, w: int, h: int, to_gray: bool = True, crop_top: Optional[int] = None):
@@ -46,85 +65,99 @@ class ImageTransform:
         self.crop_top = crop_top
 
     def __call__(self, img_bgr: np.ndarray) -> torch.Tensor:
-        """Aplica: recorte opcional → conversión (gris o RGB) → resize → normalización → tensor CHW.
-
-        Devuelve:
-            torch.Tensor con forma (1, H, W) si to_gray=True; si no, (3, H, W).
+        """
+        Aplica: (opcional) crop superior → conversión (gris/RGB) → resize → normalización → CHW tensor.
+        Acepta:
+          - array BGR (H,W,3) o GRAY (H,W) si hay OpenCV,
+          - o arrays provenientes de PIL (ver _load_image).
         """
         if img_bgr is None:
-            raise ValueError("Imagen inválida (cv2.imread devolvió None).")
+            raise ValueError("Imagen inválida (None).")
 
-        # Recorte superior si procede (antes del resize)
+        # Recorte superior (antes del resize)
         if isinstance(self.crop_top, int) and self.crop_top > 0:
-            img_bgr = img_bgr[self.crop_top :, :, :]
+            img_bgr = img_bgr[self.crop_top:, ...]
 
-        # BGR -> GRAY o BGR -> RGB
+        if _HAS_CV2:
+            # ---- Ruta OpenCV (rápida) ----
+            if self.to_gray:
+                if img_bgr.ndim == 3:
+                    img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)  # (H,W)
+                else:
+                    img = img_bgr
+                img = cv2.resize(img, (self.w, self.h), interpolation=cv2.INTER_AREA)  # (h,w)
+                img = (img.astype(np.float32) / 255.0)[None, :, :]  # (1,h,w)
+            else:
+                if img_bgr.ndim == 3:
+                    img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)   # (H,W,3)
+                else:
+                    img = np.repeat(img_bgr[..., None], 3, axis=2)   # (H,W,3)
+                img = cv2.resize(img, (self.w, self.h), interpolation=cv2.INTER_AREA)  # (h,w,3)
+                img = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)  # (3,h,w)
+            return torch.from_numpy(img)
+
+        # ---- Fallback sin OpenCV (PIL) ----
         if self.to_gray:
-            img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)  # (H, W)
+            if img_bgr.ndim == 3:
+                # BGR→GRAY manual (coeficientes aproximados BT.601)
+                b, g, r = img_bgr[..., 0], img_bgr[..., 1], img_bgr[..., 2]
+                img = (0.114 * b + 0.587 * g + 0.299 * r).astype(np.uint8)  # (H,W)
+            else:
+                img = img_bgr.astype(np.uint8)
+            pil = Image.fromarray(img, mode="L")
+            pil = pil.resize((self.w, self.h), resample=Image.BILINEAR)
+            arr = np.asarray(pil, dtype=np.float32) / 255.0  # (h,w)
+            arr = arr[None, :, :]  # (1,h,w)
         else:
-            img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)   # (H, W, 3)
+            if img_bgr.ndim == 2:
+                img = np.repeat(img_bgr[..., None], 3, axis=2)  # (H,W,3) "RGB desde gris"
+            else:
+                img = img_bgr
+            # BGR → RGB
+            img = img[..., ::-1]
+            pil = Image.fromarray(img, mode="RGB")
+            pil = pil.resize((self.w, self.h), resample=Image.BILINEAR)
+            arr = np.asarray(pil, dtype=np.float32) / 255.0      # (h,w,3)
+            arr = np.transpose(arr, (2, 0, 1))                   # (3,h,w)
 
-        # Redimensionado a tamaño fijo (w, h)
-        interp = cv2.INTER_AREA if (img.shape[0] >= self.h and img.shape[1] >= self.w) else cv2.INTER_LINEAR
-        if self.to_gray:
-            img = cv2.resize(img, (self.w, self.h), interpolation=interp)  # (h, w)
-            img = (img.astype(np.float32) / 255.0)[None, :, :]             # (1, h, w)
-        else:
-            img = cv2.resize(img, (self.w, self.h), interpolation=interp)  # (h, w, 3)
-            img = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)      # (3, h, w)
+        return torch.from_numpy(arr)
 
-        return torch.from_numpy(img)  # float32 en [0,1]
+
+# -----------------------------
+# Augmentación de imagen/label
+# -----------------------------
+@dataclass
+class AugmentConfig:
+    """Config de augmentación para UdacityCSV (solo se recomienda en train)."""
+    prob_hflip: float = 0.0
+    brightness: Optional[Tuple[float, float]] = None
+    gamma: Optional[Tuple[float, float]] = None
+    noise_std: float = 0.0
 
 
 # -----------------------------
 # Codificadores de impulsos
 # -----------------------------
 def encode_rate(x_img: torch.Tensor, T: int, gain: float) -> torch.Tensor:
-    """Codificación 'rate': para cada píxel, genera T disparos ~ Bernoulli(p), p=clip(gain*I, 0, 1).
-
-    Args:
-        x_img: tensor (1, H, W) o (C, H, W) con intensidades en [0,1].
-        T: pasos temporales.
-        gain: factor de ganancia (escala la intensidad a probabilidad).
-
-    Devuelve:
-        Tensor (T, C, H, W) de 0/1 (float32).
-    """
+    """'rate': T disparos Bernoulli por píxel con p=clip(gain*I,0,1)."""
     if x_img.dim() == 2:
         x_img = x_img.unsqueeze(0)  # (1,H,W)
-
-    p = (x_img * float(gain)).clamp_(0.0, 1.0)        # (C,H,W)
-    # Repite a lo largo de T y samplea Bernoulli
-    pT = p.unsqueeze(0).expand(T, *p.shape).contiguous()  # (T,C,H,W)
-    # Usamos torch.rand en el mismo device y dtype float32
+    p = (x_img * float(gain)).clamp_(0.0, 1.0)                  # (C,H,W)
+    pT = p.unsqueeze(0).expand(T, *p.shape).contiguous()        # (T,C,H,W)
     rnd = torch.rand_like(pT)
     return (rnd < pT).float()
 
 
 def encode_latency(x_img: torch.Tensor, T: int) -> torch.Tensor:
-    """Codificación 'latency': 1 único impulso por píxel. Más brillo ⇒ spike antes (t más pequeño).
-
-    Estrategia:
-      t = floor((1 - I) * (T - 1)), I en [0,1]
-      Si I == 0 ⇒ sin disparo (opcional: podríamos no disparar). Aquí disparamos si I > 0.
-
-    Devuelve:
-      Tensor (T, C, H, W) con 0/1.
-    """
+    """'latency': 1 spike por píxel, más brillo ⇒ spike antes (t pequeño)."""
     if x_img.dim() == 2:
         x_img = x_img.unsqueeze(0)  # (1,H,W)
-
     C, H, W = x_img.shape
-    # Calcula el tiempo de disparo por píxel (cuanto mayor I, menor t)
     t_float = (1.0 - x_img.clamp(0.0, 1.0)) * (T - 1)
-    t_idx = t_float.floor().to(torch.int64)  # (C,H,W)
-
-    spikes = torch.zeros((T, C, H, W), dtype=torch.float32, device=x_img.device)
-    # Máscara de píxeles con I > 0
+    t_idx   = t_float.floor().to(torch.int64)  # (C,H,W)
+    spikes  = torch.zeros((T, C, H, W), dtype=torch.float32, device=x_img.device)
     mask = x_img > 0.0
     if mask.any():
-        # Para cada canal/píxel, coloca un 1 en el tiempo t_idx
-        # Usamos índices avanzados: (t, c, h, w)
         t_coords = t_idx[mask]
         c_idx, h_idx, w_idx = torch.where(mask)
         spikes[t_coords, c_idx, h_idx, w_idx] = 1.0
@@ -143,20 +176,7 @@ class UdacityCSVConfig:
 
 
 class UdacityCSV(Dataset):
-    """Dataset basado en CSV de Udacity.
-
-    Soporta CSV con columnas:
-      - Estándar Udacity: 'center','left','right','steering','throttle','brake','speed'
-      - Canonizado por el notebook 01: por ejemplo, 'path','steering' (o 'image','steering').
-
-    Args:
-        csv_path: ruta al CSV de split (train/val/test).
-        base_dir: carpeta base del recorrido (contiene 'IMG/').
-        encoder: 'rate'/'latency'/'raw'.
-        T, gain: parámetros del codificador (gain solo aplica a 'rate').
-        tfm: transformación de imagen; si None, usa ImageTransform(160,80,True,None).
-        camera: si el CSV tiene múltiples rutas (center/left/right), elegir una.
-    """
+    """Dataset basado en CSV de Udacity."""
 
     def __init__(
         self,
@@ -167,25 +187,25 @@ class UdacityCSV(Dataset):
         gain: float = 0.5,
         tfm: Optional[ImageTransform] = None,
         camera: str = "center",
+        aug: Optional[AugmentConfig] = None,
     ):
         super().__init__()
         self.csv_path = Path(csv_path)
         self.base_dir = Path(base_dir)
         self.cfg = UdacityCSVConfig(encoder=encoder, T=int(T), gain=float(gain), camera=camera)
-
-        # ⚠️ Fallback sano: si no nos pasan tfm, usa valores por defecto razonables (160x80, gris).
+        self.aug = aug
         self.tfm = tfm if tfm is not None else ImageTransform(160, 80, True, None)
 
         assert self.cfg.camera in ["center", "left", "right"], "camera debe ser center/left/right"
 
-        # Carga del CSV una sola vez
+        # Carga del CSV una vez
         df = pd.read_csv(self.csv_path)
 
-        # Determina la columna de imagen y la de etiqueta (steering)
+        # Columnas de imagen/etiqueta
         self.path_col = self._infer_image_col(df, self.cfg.camera)
         self.label_col = self._infer_label_col(df)
 
-        # Preconstruye lista de (ruta_absoluta, steering) para acelerar __getitem__
+        # Preconstruye lista (ruta absoluta, steering)
         self.samples = []
         for _, row in df.iterrows():
             raw_path = str(row[self.path_col])
@@ -196,104 +216,153 @@ class UdacityCSV(Dataset):
         if len(self.samples) == 0:
             raise RuntimeError(f"CSV vacío o sin muestras válidas: {self.csv_path}")
 
+        self.labels = [y for _, y in self.samples]
+
     # ---------- utilidades internas ----------
 
     def _infer_image_col(self, df: pd.DataFrame, camera: str) -> str:
-        """Intenta localizar la columna con la ruta de imagen."""
         cols = [c.lower() for c in df.columns]
-        # Preferencias típicas de nuestro pipeline
         for candidate in ["path", "image", camera]:
             if candidate in cols:
-                # Devuelve el nombre real respetando mayúsculas del CSV
                 return df.columns[cols.index(candidate)]
-        # Si no encontramos ninguna conocida, intenta la primera que tenga pinta de ruta
-        for i, c in enumerate(df.columns):
-            if df[c].astype(str).str.contains(r"\.jpg|\.jpeg|\.png", case=False).any():
+        for c in df.columns:
+            if df[c].astype(str).str.contains(r"\.(jpg|jpeg|png)$", case=False, regex=True).any():
                 return c
-        # Último recurso: primera columna
         return df.columns[0]
 
     def _infer_label_col(self, df: pd.DataFrame) -> str:
-        """Localiza la columna de la etiqueta (steering)."""
         cols = [c.lower() for c in df.columns]
         for candidate in ["steering", "angle", "y"]:
             if candidate in cols:
                 return df.columns[cols.index(candidate)]
-        # Si no existe, error explícito
-        raise KeyError(f"No encuentro columna de etiqueta (esperaba 'steering'/'angle'/'y') en {self.csv_path}")
+        raise KeyError(f"No encuentro columna de etiqueta (steering/angle/y) en {self.csv_path}")
 
     def _resolve_path(self, raw_path: str) -> str:
-        """Convierte una ruta del CSV en una ruta absoluta en disco.
-
-        Casos manejados:
-          - Rutas relativas tipo 'IMG/xxx.jpg' → base_dir/'IMG/xxx.jpg'
-          - Rutas absolutas de otro PC: intenta recortar desde 'IMG' y reanclar a base_dir/'IMG/...'
-          - Backslashes de Windows → se normalizan a '/'
-        """
         p = Path(str(raw_path).replace("\\", "/"))
-
-        # Si viene absoluta y contiene 'IMG', recortamos desde 'IMG'
-        parts = [q for q in p.parts]
         if p.is_absolute():
+            parts = [q for q in p.parts]
             if "IMG" in parts:
                 idx = parts.index("IMG")
-                p = Path(*parts[idx:])  # 'IMG/xxx.jpg'
+                p = Path(*parts[idx:])
             else:
-                # Absoluta pero sin 'IMG': último recurso, usar nombre del fichero en base_dir/IMG
                 return str(self.base_dir / "IMG" / p.name)
-
-        # Si empieza por 'IMG', ancla a base_dir
         if len(p.parts) >= 1 and p.parts[0] == "IMG":
             return str(self.base_dir / p)
-
-        # Si es relativa pero no empieza por IMG, intenta directamente respecto a base_dir
         return str((self.base_dir / p).resolve())
 
-    # ---------- API Dataset ----------
+    # ---------- lectura de imagen + transform ----------
 
-    def __len__(self) -> int:
-        return len(self.samples)
+    def _load_image(self, path: str, as_gray: bool | None = None) -> np.ndarray:
+        """
+        Devuelve:
+          - si as_gray=True  → ndarray (H,W)   (GRIS)
+          - si as_gray=False → ndarray (H,W,3) (BGR)
+          - si as_gray=None  → modo por defecto BGR (H,W,3)
+        """
+        if as_gray is None:
+            as_gray = False
 
-    def _load_image(self, path: str) -> np.ndarray:
-        """Carga con OpenCV en BGR. Si falla, lanza excepción clara."""
-        img = cv2.imread(path, cv2.IMREAD_COLOR)
-        if img is None:
-            raise FileNotFoundError(f"No se pudo leer la imagen: {path}")
-        return img
+        if _HAS_CV2:
+            flag = cv2.IMREAD_GRAYSCALE if as_gray else cv2.IMREAD_COLOR
+            img = cv2.imread(path, flag)
+            if img is not None:
+                # cv2 ya devuelve GRAY (H,W) o BGR (H,W,3)
+                return img
+
+        # Fallback PIL
+        with Image.open(path) as im:
+            if as_gray:
+                im = im.convert("L")
+                arr = np.asarray(im)  # (H,W)
+                return arr
+            else:
+                im = im.convert("RGB")
+                rgb = np.asarray(im)      # (H,W,3)
+                bgr = rgb[..., ::-1].copy()
+                return bgr
+
+    # ---------- codificador temporal ----------
 
     def _encode(self, x_img: torch.Tensor) -> torch.Tensor:
-        """Selecciona el codificador en función de self.cfg.encoder."""
         enc = self.cfg.encoder.lower()
         if enc == "rate":
-            return encode_rate(x_img, self.cfg.T, self.cfg.gain)  # (T, C, H, W)
+            return encode_rate(x_img, self.cfg.T, self.cfg.gain)
         elif enc == "latency":
-            return encode_latency(x_img, self.cfg.T)              # (T, C, H, W)
+            return encode_latency(x_img, self.cfg.T)
         elif enc == "raw":
-            # Replicar intensidades a lo largo de T (útil para depuración)
             if x_img.dim() == 2:
                 x_img = x_img.unsqueeze(0)
             return x_img.unsqueeze(0).expand(self.cfg.T, *x_img.shape).contiguous()
         else:
             raise ValueError(f"Encoder desconocido: {self.cfg.encoder}")
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Devuelve (X, y):
-           - X: (T, 1, H, W)  (spikes 0/1 o intensidades replicadas)
-           - y: (1,)          (float32: steering en [-1, +1])
+    # ---------- augment ----------
+
+    def _apply_augmentation(self, x_img: torch.Tensor, y: float) -> tuple[torch.Tensor, float]:
+        if self.aug is None:
+            return x_img, y
+
+        # Brillo
+        if self.aug.brightness is not None:
+            lo, hi = self.aug.brightness
+            if hi > 0 and hi != 1.0:
+                factor = random.uniform(float(lo), float(hi))
+                x_img = (x_img * factor).clamp_(0.0, 1.0)
+
+        # Gamma
+        if self.aug.gamma is not None:
+            g_lo, g_hi = self.aug.gamma
+            if g_hi > 0:
+                gamma = max(1e-6, random.uniform(float(g_lo), float(g_hi)))
+                x_img = x_img.pow(gamma).clamp_(0.0, 1.0)
+
+        # Ruido
+        if self.aug.noise_std and self.aug.noise_std > 0:
+            noise = torch.randn_like(x_img) * float(self.aug.noise_std)
+            x_img = (x_img + noise).clamp_(0.0, 1.0)
+
+        # Flip horizontal
+        if self.aug.prob_hflip > 0 and random.random() < self.aug.prob_hflip:
+            x_img = torch.flip(x_img, dims=[2])  # invierte ancho (W)
+            y = -float(y)
+
+        return x_img, y
+
+    # ---------- API Dataset ----------
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        """
+        Devuelve (X, y):
+         - X: (T, C, H, W)  con C=1 si gris, C=3 si color (según tfm.to_gray)
+         - y: (1,)
         """
         img_path, y = self.samples[idx]
 
-        # Carga imagen y aplica transformación a tensor (1,H,W) o (3,H,W)
-        img_bgr = self._load_image(img_path)
-        x_img = self.tfm(img_bgr).float()
+        # Lee imagen según preferencia del transform:
+        #  - si to_gray=True  devolvemos (H,W)
+        #  - si to_gray=False devolvemos (H,W,3) BGR
+        img_arr = self._load_image(img_path, as_gray=self.tfm.to_gray)
 
-        # Para nuestro backbone actual usamos 1 canal; si llegara RGB, reducimos a gris simple
-        if x_img.dim() == 3 and x_img.shape[0] == 3:
-            # Promedio de canales como conversión rápida; alternativamente cvtColor en el transform
-            x_img = x_img.mean(dim=0, keepdim=True)
+        # Transform → tensor (1,H,W) o (3,H,W) según to_gray
+        x_img = self.tfm(img_arr).float()
 
-        # Codificación temporal a impulsos
-        X = self._encode(x_img)  # (T, 1, H, W)
+        # **Respeta to_gray**:
+        #  - si to_gray=True  ⇒ esperamos (1,H,W)
+        #  - si to_gray=False ⇒ esperamos (3,H,W) (no colapsar a gris)
+        if self.tfm.to_gray:
+            if x_img.dim() == 2:
+                x_img = x_img.unsqueeze(0)              # (1,H,W)
+            elif x_img.dim() == 3 and x_img.shape[0] == 3:
+                x_img = x_img.mean(dim=0, keepdim=True)  # seguridad extra
+        else:
+            if x_img.dim() == 2:
+                x_img = x_img.unsqueeze(0).expand(3, *x_img.shape[1:])  # gris→3 canales si llegara en 2D
+
+        # Codificación temporal
+        X = self._encode(x_img)  # (T, C, H, W) con C=1 o 3
         y_t = torch.tensor([y], dtype=torch.float32)
 
         return X, y_t

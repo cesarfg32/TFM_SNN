@@ -8,3 +8,4 @@ tqdm>=4.66,<5
 snntorch>=0.8,<0.10
 # Instala torch/torchvision según CUDA (p.ej. cu129 para tu 4080)
 ipykernel>=6.29,<7
+opencv-python>=4.8
