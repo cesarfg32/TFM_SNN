@@ -20,7 +20,7 @@ Stack: **PyTorch + snnTorch**, ejecución local en **Linux/WSL2 + CUDA** o CPU.
 
 ```bash
 # Clona el repo
-git clone https://github.com/TU_GITHUB/TFM_SNN.git
+git clone https://github.com/cesarfg32/TFM_SNN.git
 cd TFM_SNN
 
 # Crea y activa el entorno del proyecto
