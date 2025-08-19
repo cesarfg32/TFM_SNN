@@ -169,7 +169,7 @@ def encode_latency(x_img: torch.Tensor, T: int) -> torch.Tensor:
 # -----------------------------
 @dataclass
 class UdacityCSVConfig:
-    encoder: str = "rate"   # 'rate' | 'latency' | 'raw'
+    encoder: str = "rate"   # 'rate' | 'latency' | 'raw' | 'image'
     T: int = 10
     gain: float = 0.5
     camera: str = "center"  # 'center' | 'left' | 'right'
@@ -293,6 +293,12 @@ class UdacityCSV(Dataset):
             if x_img.dim() == 2:
                 x_img = x_img.unsqueeze(0)
             return x_img.unsqueeze(0).expand(self.cfg.T, *x_img.shape).contiguous()
+        elif enc == "image":
+            # Devolvemos solamente (C,H,W) para que el DataLoader
+            # entregue batches 4D (B,C,H,W) y el encode se haga en GPU.
+            if x_img.dim() == 2:
+                x_img = x_img.unsqueeze(0)
+            return x_img
         else:
             raise ValueError(f"Encoder desconocido: {self.cfg.encoder}")
 

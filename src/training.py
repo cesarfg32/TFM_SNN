@@ -13,6 +13,47 @@ from tqdm import tqdm
 
 from .utils import set_seeds  # reproducibilidad global
 
+# --- Runtime encode (para loaders 4D) ---
+_RUNTIME_ENC = {"mode": None, "T": None, "gain": None, "device": torch.device("cpu")}
+
+def set_runtime_encode(mode: str | None, T: int | None = None, gain: float | None = None, device=None):
+    """
+    Activa/desactiva codificación temporal en runtime para inputs 4D (B,C,H,W).
+    - mode: "rate" | "latency" | "raw" | None
+    - T, gain: parámetros del encoder
+    - device: torch.device destino (por defecto CUDA si disponible)
+    """
+    global _RUNTIME_ENC
+    if mode is None:
+        _RUNTIME_ENC.update({"mode": None, "T": None, "gain": None, "device": torch.device("cpu")})
+        return
+    _RUNTIME_ENC.update({
+        "mode": str(mode),
+        "T": int(T) if T is not None else None,
+        "gain": float(gain) if gain is not None else None,
+        "device": device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+    })
+
+
+def _encode_rate_gpu(x: torch.Tensor, T: int, gain: float) -> torch.Tensor:
+    # x: (B,C,H,W) en [0,1]
+    p = (x * gain).clamp_(0.0, 1.0)                       # (B,C,H,W)
+    pT = p.unsqueeze(0).expand(T, *p.shape).contiguous()  # (T,B,C,H,W)
+    rnd = torch.rand_like(pT)
+    return (rnd < pT).float()
+
+def _encode_latency_gpu(x: torch.Tensor, T: int) -> torch.Tensor:
+    # x: (B,C,H,W) en [0,1]
+    B, C, H, W = x.shape
+    t_float = (1.0 - x.clamp(0.0, 1.0)) * (T - 1)     # (B,C,H,W)
+    t_idx = t_float.floor().to(torch.long)            # (B,C,H,W)
+    spikes = torch.zeros((T, B, C, H, W), dtype=torch.float32, device=x.device)
+    mask = x > 0.0
+    if mask.any():
+        b, c, h, w = torch.where(mask)               # 1D idxs alineados
+        t = t_idx[b, c, h, w]                        # (N,)
+        spikes[t, b, c, h, w] = 1.0
+    return spikes
 
 # ---------------------------------------------------------------------
 # Configuración de entrenamiento
@@ -31,11 +72,55 @@ class TrainConfig:
 # - Los DataLoaders devuelven (B,T,C,H,W); el modelo espera (T,B,C,H,W).
 # ---------------------------------------------------------------------
 def _permute_if_needed(x: torch.Tensor) -> torch.Tensor:
+    """
+    - Si llega 5D como (B,T,C,H,W), permuta a (T,B,C,H,W).
+    - Si llega 4D (B,C,H,W) y runtime encode está activo, codifica en el DEVICE indicado
+      por set_runtime_encode(...) y devuelve (T,B,C,H,W) directamente en ese device.
+    - Si no aplica, devuelve x tal cual.
+    """
+    # 5D -> (T,B,C,H,W)
     if x.ndim == 5 and x.shape[0] != x.shape[1]:
-        # Asumimos (B,T,C,H,W) -> (T,B,C,H,W)
         return x.permute(1, 0, 2, 3, 4).contiguous()
-    return x
 
+    # 4D con runtime encode activo
+    if x.ndim == 4 and _RUNTIME_ENC["mode"] is not None:
+        mode  = _RUNTIME_ENC["mode"].lower()
+        T     = int(_RUNTIME_ENC["T"])
+        gain  = _RUNTIME_ENC["gain"]
+        dev   = _RUNTIME_ENC["device"]
+
+        # ¡Primero mover el 4D pequeño a GPU!
+        x = x.to(dev, non_blocking=True)  # (B,C,H,W)
+        B, C, H, W = x.shape
+
+        if mode == "rate":
+            # Bernoulli en GPU
+            p = (x * float(gain)).clamp_(0.0, 1.0)                      # (B,C,H,W)
+            pT = p.unsqueeze(0).expand(T, B, C, H, W)                   # (T,B,C,H,W)
+            rnd = torch.rand((T, B, C, H, W), device=dev, dtype=p.dtype)
+            out = (rnd < pT).to(x.dtype)                                # (T,B,C,H,W)
+
+        elif mode == "latency":
+            x1 = x.clamp(0.0, 1.0)
+            t_float = (1.0 - x1) * (T - 1)                              # (B,C,H,W)
+            t_idx = t_float.floor().to(torch.int64)
+            out = torch.zeros((T, B, C, H, W), dtype=x.dtype, device=dev)
+            mask = x1 > 0
+            if mask.any():
+                t_coords = t_idx[mask]
+                b, c, h, w = torch.where(mask)
+                out[t_coords, b, c, h, w] = 1.0
+
+        elif mode == "raw":
+            out = x.unsqueeze(0).expand(T, B, C, H, W).contiguous()     # (T,B,C,H,W)
+
+        else:
+            raise ValueError(f"Unsupported runtime encode mode: {mode}")
+
+        return out  # ya está en (T,B,C,H,W) y en la GPU
+
+    # Caso por defecto
+    return x
 
 # ---------------------------------------------------------------------
 # Entrenamiento supervisado de una tarea

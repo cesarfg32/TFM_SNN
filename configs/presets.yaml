@@ -14,7 +14,7 @@ std:
   gain: 0.5
   encoder: rate
   lr: 5.0e-4         # ↓ antes 7.5e-4
-  amp: false
+  amp: true
 
 accurate:
   epochs: 20
