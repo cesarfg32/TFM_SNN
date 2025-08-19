@@ -112,3 +112,28 @@ class EWC:
                 reg = reg + (self._fisher[n] * (p - self._mu[n]).pow(2)).sum()
 
         return self.cfg.lambd * reg
+
+# --- Wrapper para la API de métodos (sin tocar tu EWC original) ---
+from torch import nn
+import torch
+
+class EWCMethod:
+    name = "ewc"
+
+    def __init__(self, model: nn.Module, lambd: float, fisher_batches: int,
+                 loss_fn: nn.Module, device: torch.device):
+        # Reutiliza tu implementación exactamente igual
+        self.loss_fn = loss_fn
+        self.device = device
+        self.impl = EWC(model, EWCConfig(lambd=float(lambd), fisher_batches=int(fisher_batches)))
+
+    def penalty(self) -> torch.Tensor:
+        return self.impl.penalty()
+
+    def before_task(self, model: nn.Module, train_loader, val_loader) -> None:
+        # no-op
+        pass
+
+    def after_task(self, model: nn.Module, train_loader, val_loader) -> None:
+        # Igual que hacías: estimar Fisher tras entrenar la tarea
+        self.impl.estimate_fisher(val_loader, self.loss_fn, device=self.device)
