@@ -34,27 +34,6 @@ def set_runtime_encode(mode: str | None, T: int | None = None, gain: float | Non
         "device": device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
     })
 
-
-def _encode_rate_gpu(x: torch.Tensor, T: int, gain: float) -> torch.Tensor:
-    # x: (B,C,H,W) en [0,1]
-    p = (x * gain).clamp_(0.0, 1.0)                       # (B,C,H,W)
-    pT = p.unsqueeze(0).expand(T, *p.shape).contiguous()  # (T,B,C,H,W)
-    rnd = torch.rand_like(pT)
-    return (rnd < pT).float()
-
-def _encode_latency_gpu(x: torch.Tensor, T: int) -> torch.Tensor:
-    # x: (B,C,H,W) en [0,1]
-    B, C, H, W = x.shape
-    t_float = (1.0 - x.clamp(0.0, 1.0)) * (T - 1)     # (B,C,H,W)
-    t_idx = t_float.floor().to(torch.long)            # (B,C,H,W)
-    spikes = torch.zeros((T, B, C, H, W), dtype=torch.float32, device=x.device)
-    mask = x > 0.0
-    if mask.any():
-        b, c, h, w = torch.where(mask)               # 1D idxs alineados
-        t = t_idx[b, c, h, w]                        # (N,)
-        spikes[t, b, c, h, w] = 1.0
-    return spikes
-
 # ---------------------------------------------------------------------
 # Configuración de entrenamiento
 # ---------------------------------------------------------------------
