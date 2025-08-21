@@ -114,8 +114,6 @@ class EWC:
         return self.cfg.lambd * reg
 
 # --- Wrapper para la API de métodos (sin tocar tu EWC original) ---
-from torch import nn
-import torch
 
 class EWCMethod:
     name = "ewc"
@@ -126,6 +124,7 @@ class EWCMethod:
         self.loss_fn = loss_fn
         self.device = device
         self.impl = EWC(model, EWCConfig(lambd=float(lambd), fisher_batches=int(fisher_batches)))
+        self.name = f"ewc_lam_{lambd:.0e}"
 
     def penalty(self) -> torch.Tensor:
         return self.impl.penalty()
