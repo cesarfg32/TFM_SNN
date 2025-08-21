@@ -15,7 +15,7 @@ import torch
 
 from src.runner import run_continual
 from src.datasets import ImageTransform
-from src.models import SNNVisionRegressor
+from src.models import build_model, default_tfm_for_model
 from src.utils import make_loaders_from_csvs
 
 def main():
@@ -29,6 +29,11 @@ def main():
     ap.add_argument("--epochs-override", type=int, default=None)
     ap.add_argument("--out-root", default="outputs")
     ap.add_argument("--no-runtime-encode", action="store_true")
+    ap.add_argument("--model", default="snn_vision",
+                choices=["snn_vision","pilotnet_ann","pilotnet_snn"])
+    ap.add_argument("--img-w", type=int, default=None)
+    ap.add_argument("--img-h", type=int, default=None)
+    ap.add_argument("--rgb", action="store_true")  # por si quieres color
     args = ap.parse_args()
 
     # Carga de tareas
@@ -36,11 +41,14 @@ def main():
     task_list = [{"name": n, "paths": tasks_json["splits"][n]} for n in tasks_json["tasks_order"]]
 
     # Transform por defecto
-    tfm = ImageTransform(160, 80, True, None)
+    if args.img_w is None or args.img_h is None:
+        tfm = default_tfm_for_model(args.model, to_gray=(not args.rgb))
+    else:
+        tfm = ImageTransform(args.img_w, args.img_h, to_gray=(not args.rgb), crop_top=None)
 
-    # Model factory
+    # y el factory del modelo:
     def make_model_fn(tfm):
-        return SNNVisionRegressor(in_channels=(1 if tfm.to_gray else 3), lif_beta=0.95)
+        return build_model(args.model, tfm, beta=0.9, threshold=0.5)
 
     # Loader factory QUE RESPETA runtime_encode
     runtime_encode = (not args.no_runtime_encode)
