@@ -40,6 +40,16 @@ def run_continual(
     loss_fn = torch.nn.MSELoss()
     model   = make_model_fn(tfm)
 
+    def _model_label(model, tfm) -> str:
+        # p. ej. "PilotNetSNN_66x200_gray" o "PilotNetANN_66x200_gray"
+        cls = getattr(model, "__class__", type(model)).__name__
+        h = getattr(tfm, "h", "?")
+        w = getattr(tfm, "w", "?")
+        ch = "rgb" if not getattr(tfm, "to_gray", True) else "gray"
+        return f"{cls}_{h}x{w}_{ch}"
+
+    model_lbl = _model_label(model, tfm)
+
     method_l = method.lower()
     method_kwargs = (method_kwargs or {}).copy()
 
@@ -60,10 +70,7 @@ def run_continual(
         tag = f"{tag}_lam_{float(lam_for_tag):.0e}"
 
 
-
-
-
-    out_tag = f"continual_{preset}_{tag}_{encoder}_seed_{seed}"
+    out_tag = f"continual_{preset}_{tag}_{encoder}_model-{model_lbl}_seed_{seed}"
     out_dir = (Path(out_root) if out_root else Path("outputs")) / out_tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
