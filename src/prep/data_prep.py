@@ -1,4 +1,4 @@
-# src/prep/udacity_prep.py
+# src/prep/data_prep.py
 # -*- coding: utf-8 -*-
 """
 Preparación offline del dataset Udacity:
@@ -39,6 +39,18 @@ import pandas as pd
 
 
 # ------------------------------- Utils --------------------------------
+def _json_default(o):
+    # Paths ⇒ str
+    if isinstance(o, Path):
+        return str(o)
+    # numpy escalares ⇒ tipos Python
+    try:
+        import numpy as _np
+        if isinstance(o, (_np.integer, _np.floating)):
+            return o.item()
+    except Exception:
+        pass
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 def _fix_path(s: str) -> str:
     if pd.isna(s): 
@@ -122,7 +134,8 @@ def stratified_split(
     train: float = 0.70,
     val: float = 0.15,
     seed: int = 42,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    return_edges: bool = False,   # <--- nuevo
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray]:
     """
     Split estratificado por histogramas de `steering` (pd.cut).
 
@@ -149,8 +162,20 @@ def stratified_split(
     tr = pd.concat([a for a,_,_ in parts], ignore_index=True)
     va = pd.concat([b for _,b,_ in parts], ignore_index=True)
     te = pd.concat([c for _,_,c in parts], ignore_index=True)
+    if return_edges:
+        return tr, va, te, edges
     return tr, va, te
 
+def verify_processed_splits(proc_root: Path, runs: list[str]) -> None:
+    missing = []
+    for run in runs:
+        base = proc_root / run
+        for part in ["train","val","test"]:
+            p = base / f"{part}.csv"
+            if not p.exists():
+                missing.append(str(p))
+    if missing:
+        raise FileNotFoundError("Faltan CSV obligatorios:\n" + "\n".join(" - " + m for m in missing))
 
 # -------------------------- Oversampling por bins ---------------------
 
@@ -297,49 +322,9 @@ def run_prep(cfg: PrepConfig) -> dict:
         "tasks_balanced_json": str(tasks_balanced_path) if tasks_balanced_path else None,
     }
 
-    (PROC / "prep_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    (PROC / "prep_manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False, default=_json_default),
+        encoding="utf-8"
+    )
     return manifest
 
-
-def main():
-    ap = argparse.ArgumentParser(description="Prep Udacity: limpieza, split y balanceo por bins (opcional).")
-    ap.add_argument("--root", type=Path, default=Path("."), help="Raíz del repo (contiene data/).")
-    ap.add_argument("--runs", nargs="+", required=True, help="Nombres de recorridos: p.ej. circuito1 circuito2")
-    ap.add_argument("--use-left-right", action="store_true", help="Expande cámaras left/right reubicándolas en 'center'.")
-    ap.add_argument("--steer-shift", type=float, default=0.2, help="Corrección de steering para left/right (±shift).")
-    ap.add_argument("--bins", type=int, default=21, help="Nº de bins para estratificar/balancear steering.")
-    ap.add_argument("--train", type=float, default=0.70, help="Proporción de train.")
-    ap.add_argument("--val", type=float, default=0.15, help="Proporción de val (resto es test).")
-    ap.add_argument("--seed", type=int, default=42, help="Semilla global.")
-    ap.add_argument("--target-per-bin", default="auto", help="'auto' o un entero (objetivo por bin en train).")
-    ap.add_argument("--cap-per-bin", type=int, default=12000, help="Techo por bin cuando target_per_bin='auto'.")
-    args = ap.parse_args()
-
-    target = args.target_per_bin
-    if isinstance(target, str) and target.lower() != "auto":
-        try:
-            target = int(target)  # permite pasar "--target-per-bin 8000"
-        except Exception:
-            raise ValueError("--target-per-bin debe ser 'auto' o un entero.")
-
-    cfg = PrepConfig(
-        root=args.root,
-        runs=list(args.runs),
-        use_left_right=bool(args.use_left_right),
-        steer_shift=float(args.steer_shift),
-        bins=int(args.bins),
-        train=float(args.train),
-        val=float(args.val),
-        seed=int(args.seed),
-        target_per_bin=target,
-        cap_per_bin=int(args.cap_per_bin) if args.cap_per_bin is not None else None,
-    )
-    manifest = run_prep(cfg)
-    print("OK:", (Path(cfg.root)/"data"/"processed"/"prep_manifest.json"))
-    if manifest["outputs"]["tasks_balanced_json"]:
-        print(" - tasks_balanced.json:", manifest["outputs"]["tasks_balanced_json"])
-    print(" - tasks.json:", manifest["outputs"]["tasks_json"])
-
-
-if __name__ == "__main__":
-    main()

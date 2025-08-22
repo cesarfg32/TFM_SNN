@@ -10,7 +10,7 @@ Uso:
 """
 from __future__ import annotations
 
-# --- NUEVO: asegurar que la raíz del repo está en sys.path ---
+# --- asegurar que la raíz del repo está en sys.path ---
 import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
