@@ -18,22 +18,20 @@ def run_continual(
     make_model_fn,
     tfm,
     preset: str,
-    method: str,                 # "naive" | "ewc" | "rehearsal" | "rehearsal+ewc" | futuros
+    method: str,                 # "naive" | "ewc" | "rehearsal" | "rehearsal+ewc" | ...
     seed: int,
     encoder: str,
-    fisher_batches_by_preset: Optional[dict[str,int]] = None,
     epochs_override: Optional[int] = None,
     runtime_encode: bool = True,
     out_root: Path | str | None = None,
     verbose: bool = True,
     *,
-    method_kwargs: Optional[Dict[str, Any]] = None,  # <- único sitio donde van hiperparámetros
+    method_kwargs: Optional[Dict[str, Any]] = None,  # <- único sitio para hiperparámetros
 ):
     cfg = load_preset(ROOT / "configs" / "presets.yaml", preset)
     T, gain, lr = int(cfg["T"]), float(cfg["gain"]), float(cfg["lr"])
     epochs, bs, use_amp = int(epochs_override or cfg["epochs"]), int(cfg["batch_size"]), bool(cfg["amp"])
 
-    fb = (fisher_batches_by_preset or {}).get(preset, 100)
     set_seeds(seed)
 
     device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,21 +51,17 @@ def run_continual(
     method_l = method.lower()
     method_kwargs = (method_kwargs or {}).copy()
 
-    # Construcción unificada (el builder resuelve composites tipo "rehearsal+ewc")
+    # Un único builder: soporta puro o composite "+ewc"
     method_obj = build_method(
-        method_l,
-        model,
-        loss_fn=loss_fn,
-        device=device,
-        fisher_batches=fb,
-        **method_kwargs,   # <- TODOS los hiperparámetros del método van aquí
+        method_l, model,
+        loss_fn=loss_fn, device=device,
+        **method_kwargs,
     )
+    tag = method_obj.name  # "naive" | "ewc" | "rehearsal" | "rehearsal+ewc"
 
-    # Nombre del experimento: usa .name y añade sufijo de λ si aplica
-    tag = method_obj.name  # p.ej., "naive", "ewc", "rehearsal", "rehearsal+ewc"
-    lam_for_tag = method_kwargs.get("lam") or method_kwargs.get("ewc_lam")
-    if ("ewc" in tag) and (lam_for_tag is not None):
-        tag = f"{tag}_lam_{float(lam_for_tag):.0e}"
+    # Si el método incluye EWC y pasaste 'lam', añádelo al tag
+    if ("ewc" in tag) and ("lam" in method_kwargs):
+        tag = f"{tag}_lam_{float(method_kwargs['lam']):.0e}"
 
 
     out_tag = f"continual_{preset}_{tag}_{encoder}_model-{model_lbl}_seed_{seed}"

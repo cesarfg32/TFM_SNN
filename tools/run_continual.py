@@ -16,13 +16,11 @@ from src.utils import make_loaders_from_csvs
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", required=True, choices=["fast", "std", "accurate"])
-    ap.add_argument("--method", required=True,
-                    choices=["naive", "ewc", "rehearsal", "rehearsal+ewc"])
-    # Hiperparámetros (se mapean a method_kwargs):
-    ap.add_argument("--lam", type=float, default=None, help="λ para EWC")
-    ap.add_argument("--ewc-lam", type=float, default=None,
-                    help="λ de EWC cuando --method rehearsal+ewc")
+    ap.add_argument("--preset", required=True, choices=["fast","std","accurate"])
+    ap.add_argument("--method", required=True, choices=["naive","ewc","rehearsal","rehearsal+ewc"])
+    ap.add_argument("--lam", type=float, default=None)           # lam para EWC puro o +EWC
+    ap.add_argument("--fisher-batches", type=int, default=None)  # opcional
+    # Rehearsal
     ap.add_argument("--buffer-size", type=int, default=10_000)
     ap.add_argument("--replay-ratio", type=float, default=0.2)
 
@@ -79,8 +77,10 @@ def main():
     method_kwargs = {}
     if args.method == "ewc":
         if args.lam is None:
-            ap.error("--lam es obligatorio cuando --method ewc")
-        method_kwargs["lam"] = args.lam
+            raise SystemExit("Para --method ewc debes indicar --lam")
+        method_kwargs["lam"] = float(args.lam)
+        if args.fisher_batches is not None:
+            method_kwargs["fisher_batches"] = int(args.fisher_batches)
 
     elif args.method == "rehearsal":
         method_kwargs.update({
@@ -89,14 +89,15 @@ def main():
         })
 
     elif args.method == "rehearsal+ewc":
-        if args.ewc_lam is None:
-            ap.error("--ewc-lam es obligatorio cuando --method rehearsal+ewc")
+        if args.lam is None:
+            raise SystemExit("Para --method rehearsal+ewc debes indicar --lam")
         method_kwargs.update({
             "buffer_size": args.buffer_size,
             "replay_ratio": args.replay_ratio,
-            "ewc_lam": args.ewc_lam,
+            "lam": float(args.lam),
         })
-    # naive → method_kwargs = {}
+        if args.fisher_batches is not None:
+            method_kwargs["fisher_batches"] = int(args.fisher_batches)
 
     out_dir, res = run_continual(
         task_list=task_list,
@@ -107,12 +108,10 @@ def main():
         method=args.method,
         seed=args.seed,
         encoder=args.encoder,
-        fisher_batches_by_preset={"fast": 200, "std": 600, "accurate": 800},
-        epochs_override=args.epochs_override,
         runtime_encode=runtime_encode,
         out_root=args.out_root,
         verbose=True,
-        method_kwargs=method_kwargs,   # << único canal de hiperparámetros
+        method_kwargs=method_kwargs,   # <- único sitio
     )
     print("OK:", out_dir)
 
