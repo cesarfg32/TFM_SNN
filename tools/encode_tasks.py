@@ -1,72 +1,186 @@
 # tools/encode_tasks.py
 from __future__ import annotations
-import argparse, json
+import argparse, json, os, hashlib, tempfile
 from pathlib import Path
 import sys
+from datetime import datetime, timezone
 
-# Asegurar raíz del repo en sys.path
+import h5py  # pip install h5py
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.prep.encode_offline import encode_csv_to_h5
+from src.utils import load_preset
+from src.prep.encode_offline import encode_csv_to_h5  # tu función de codificación
 
-def _p(s: str | Path) -> Path:
-    p = Path(s)
-    return p if p.is_absolute() else (ROOT / p)
+
+# --------------------- utilidades manifest ---------------------
+def _file_sha256(path: Path, chunk=1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+def _read_h5_attrs(p: Path) -> dict:
+    out = {}
+    try:
+        with h5py.File(p, "r") as h5:
+            out = {k: h5.attrs[k] for k in h5.attrs.keys()}
+            out["_N"] = int(h5["spikes"].shape[0]) if "spikes" in h5 else None
+    except Exception as e:
+        out["_error"] = str(e)
+    norm = {}
+    for k, v in out.items():
+        try:
+            norm[k] = v.item() if hasattr(v, "item") else v
+        except Exception:
+            norm[k] = str(v)
+    return norm
+
+def update_prep_manifest(
+    manifest_path: Path,
+    *,
+    out_h5: Path,
+    source_csv: Path,
+    encoder: str,
+    T: int,
+    gain: float,
+    size_wh: tuple[int, int],
+    to_gray: bool,
+    cmdline: str,
+) -> None:
+    """Upsert por clave = ruta del .h5. Escritura atómica."""
+    manifest_path = Path(manifest_path)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    attrs = _read_h5_attrs(out_h5)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    record = {
+        "out": str(out_h5),
+        "created_utc": now_iso,
+        "sha256": _file_sha256(out_h5) if out_h5.exists() else None,
+        "size_bytes": os.path.getsize(out_h5) if out_h5.exists() else None,
+        "source_csv": str(source_csv),
+        "encoder": str(encoder),
+        "T": int(T),
+        "gain": float(gain),
+        "size_wh": [int(size_wh[0]), int(size_wh[1])],
+        "to_gray": bool(to_gray),
+        "h5_attrs": attrs,
+        "cmdline": cmdline,
+    }
+
+    data = {"version": 1, "entries": {}}
+    if manifest_path.exists():
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(data.get("entries", {}), dict):
+                data = {"version": 1, "entries": {}}
+        except Exception:
+            data = {"version": 1, "entries": {}}
+
+    data["entries"][str(out_h5)] = record  # upsert
+
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tmp:
+        json.dump(data, tmp, indent=2, ensure_ascii=False)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    os.replace(tmp_name, manifest_path)
+    print(f"[manifest] actualizado: {manifest_path} (clave: {out_h5.name})")
+
+
+# --------------------- script principal ---------------------
+def _fmt_gain(g: float) -> str:
+    s = f"{g:.6g}"
+    try:
+        s = str(float(s))
+    except Exception:
+        pass
+    return s
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Codifica en H5 (offline) todos los splits definidos en tasks.json / tasks_balanced.json."
-    )
-    ap.add_argument("--tasks-file", default="data/processed/tasks_balanced.json",
-                    help="Ruta a tasks.json o tasks_balanced.json")
-    ap.add_argument("--runs", nargs="*", default=None,
-                    help="Opcional: lista de runs a incluir (por nombre). Si no se indica, usa tasks_order completa.")
-    ap.add_argument("--encoder", choices=["rate","latency","raw"], default="rate")
-    ap.add_argument("--T", type=int, default=20)
-    ap.add_argument("--gain", type=float, default=0.5,
-                    help="Solo aplica a encoder=rate (ignorado en latency/raw)")
-    ap.add_argument("--w", type=int, default=200)
-    ap.add_argument("--h", type=int, default=66)
-    ap.add_argument("--rgb", action="store_true", help="Por defecto codifica en gris; añade --rgb para color.")
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--force", action="store_true", help="Reescribe H5 si ya existe.")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", type=Path, default=Path("configs/presets.yaml"))
+    ap.add_argument("--preset", required=True, choices=["fast", "std", "accurate"])
+    ap.add_argument("--tasks-file", type=Path, default=Path("data/processed/tasks.json"))
+    ap.add_argument("--overwrite", action="store_true",
+                    help="Re-codifica aunque el .h5 ya exista (por defecto, se salta).")
+    ap.add_argument("--manifest-scope", choices=["per-run", "global"], default="per-run",
+                    help="Dónde guardar prep_manifest.json (por circuito o global).")
     args = ap.parse_args()
 
-    tasks = json.loads(_p(args.tasks_file).read_text(encoding="utf-8"))
-    order = tasks["tasks_order"] if args.runs is None else [r for r in args.runs if r in tasks["tasks_order"]]
+    cfg = load_preset(args.config, args.preset)
+    mw, mh = int(cfg["model"]["img_w"]), int(cfg["model"]["img_h"])
+    to_gray = bool(cfg["model"]["to_gray"])
 
-    for run in order:
-        splits = tasks["splits"][run]
-        base_dir = ROOT / "data" / "raw" / "udacity" / run
+    T = int(cfg["data"]["T"])
+    enc = str(cfg["data"]["encoder"])
+    gain = float(cfg["data"]["gain"])
+    seed = int(cfg["data"]["seed"])
+    assert enc in {"rate", "latency", "raw"}, "encode_offline aplica a rate/latency/raw"
 
-        for split_name in ["train", "val", "test"]:
-            csv_path = _p(splits[split_name])
-            out_dir  = csv_path.parent
-            out_dir.mkdir(parents=True, exist_ok=True)
+    with open(args.tasks_file, "r", encoding="utf-8") as f:
+        tasks_json = json.load(f)
 
-            suffix_gain = f"gain{args.gain}" if args.encoder == "rate" else "gain0"
-            color = "rgb" if args.rgb else "gray"
-            out_name = f"{split_name}_{args.encoder}_T{args.T}_{suffix_gain}_{color}_{args.w}x{args.h}.h5"
-            out_path = out_dir / out_name
+    for run in tasks_json["tasks_order"]:
+        paths = tasks_json["splits"][run]
+        base = ROOT / "data" / "raw" / "udacity" / run
+        outdir = ROOT / "data" / "processed" / run
+        outdir.mkdir(parents=True, exist_ok=True)
 
-            if out_path.exists() and not args.force:
-                print(f"[SKIP] {out_path.name} (ya existe)")
-                continue
+        manifest_path = (outdir / "prep_manifest.json") if (args.manifest_scope == "per-run") \
+                        else (ROOT / "data" / "processed" / "prep_manifest.json")
 
-            encode_csv_to_h5(
-                csv_df_or_path=csv_path,
-                base_dir=base_dir,
-                out_path=out_path,
-                encoder=args.encoder,
-                T=args.T,
-                gain=args.gain,
-                size_wh=(args.w, args.h),
-                to_gray=(not args.rgb),
-                seed=args.seed,
-            )
-            print("OK:", out_path)
+        for split in ["train", "val", "test"]:
+            csv_rel_or_abs = Path(paths[split])
+            csv = csv_rel_or_abs if csv_rel_or_abs.is_absolute() else (ROOT / csv_rel_or_abs)
+
+            parts = [split, enc, f"T{T}"]
+            if enc == "rate":
+                parts.append(f"gain{_fmt_gain(gain)}")
+            parts.append("gray" if to_gray else "rgb")
+            parts.append(f"{mw}x{mh}")
+            out_name = "_".join(parts) + ".h5"
+
+            out = outdir / out_name
+
+            if out.exists() and not args.overwrite:
+                print(f"SKIP (ya existe): {out}")
+            else:
+                encode_csv_to_h5(
+                    csv_df_or_path=csv,
+                    base_dir=base,
+                    out_path=out,
+                    encoder=enc,
+                    T=T,
+                    gain=(gain if enc == "rate" else 0.0),
+                    size_wh=(mw, mh),
+                    to_gray=to_gray,
+                    seed=seed,
+                )
+                print("OK:", out)
+
+            if out.exists():
+                update_prep_manifest(
+                    manifest_path,
+                    out_h5=out,
+                    source_csv=csv,
+                    encoder=enc,
+                    T=T,
+                    gain=(gain if enc == "rate" else 0.0),
+                    size_wh=(mw, mh),
+                    to_gray=to_gray,
+                    cmdline=" ".join(sys.argv),
+                )
+            else:
+                print(f"[WARN] no se pudo registrar en manifest (no existe): {out}")
 
 if __name__ == "__main__":
     main()
