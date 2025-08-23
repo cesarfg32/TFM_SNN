@@ -75,7 +75,7 @@ center,left,right,steering,throttle,brake,speed
 ## Parámetros clave y decisiones
 
 - **Codificación a impulsos**: por defecto *on-the-fly* (rate/latency); opción *offline* en HDF5.
-- **Preprocesado**: gris, `160×80`, recorte opcional (editable en código).
+- **Preprocesado**: gris, `200×66`, recorte opcional (editable en código).
 - **Estratificación**: por bins de `steering` para evitar sesgo a “recta”.
 - **Reproducibilidad**: semillas fijadas en `src/utils.py`.
 

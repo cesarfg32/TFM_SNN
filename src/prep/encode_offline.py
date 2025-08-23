@@ -96,7 +96,7 @@ def encode_csv_to_h5(
     encoder: str = "rate",     # "rate" | "latency" | "raw"
     T: int = 20,
     gain: float = 0.5,
-    size_wh: tuple[int, int] = (160, 80),
+    size_wh: tuple[int, int] = (200, 66),
     to_gray: bool = True,
     seed: int = 42,
     compression: str = "gzip",

@@ -95,7 +95,7 @@ from src.utils import make_loaders_from_csvs, set_seeds
 def make_loader_fn_factory(
     ROOT: Path,
     *,
-    GPU_ENCODE: bool,
+    RUNTIME_ENCODE: bool,
     SEED: int,
     num_workers: int,
     prefetch_factor: int | None,
@@ -109,7 +109,7 @@ def make_loader_fn_factory(
         RAW = Path(ROOT) / "data" / "raw" / "udacity" / task["name"]
         paths = task["paths"]
         # Si vamos a codificar en GPU, el loader debe ser 4D (image)
-        encoder_for_loader = "image" if (GPU_ENCODE and encoder in {"rate", "latency", "raw"}) else encoder
+        encoder_for_loader = "image" if (RUNTIME_ENCODE and encoder in {"rate", "latency", "raw"}) else encoder
         return make_loaders_from_csvs(
             base_dir=RAW,
             train_csv=Path(paths["train"]),

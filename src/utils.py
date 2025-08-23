@@ -240,7 +240,7 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int,
     want_T    = int(T)
     want_gain = float(gain) if want_enc == "rate" else 0.0
     want_gray = bool(getattr(tfm, "to_gray", True))
-    want_size = (int(getattr(tfm, "w", 160)), int(getattr(tfm, "h", 80)))
+    want_size = (int(getattr(tfm, "w", 200)), int(getattr(tfm, "h", 66)))
 
     candidates = sorted(base_proc.glob(f"{split}_*.h5"))
     for f in candidates:
@@ -295,7 +295,7 @@ def make_loaders_from_h5(
     return _mk(train_h5, True), _mk(val_h5, False), _mk(test_h5, False)
 
 
-def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, gpu_encode: bool):
+def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, runtime_encode: bool):
     """
     Devuelve una función make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs)
     que decide automáticamente entre:
@@ -305,16 +305,19 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, gpu_encode: bo
     proc_root = root / "data" / "processed"
     raw_root  = root / "data" / "raw" / "udacity"
 
+    def _abs(p: str | Path) -> Path:
+        p = Path(p)
+        return p if p.is_absolute() else (root / p)
+
     def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
         run = task["name"]
         base_proc = proc_root / run
 
-        # --- Ruta H5 offline por atributos ---
+        # --- H5 offline (tal cual lo tienes) ---
         if use_offline_spikes and encoder in {"rate", "latency", "raw"}:
             tr_h5 = _pick_h5_by_attrs(base_proc, "train", encoder=encoder, T=T, gain=gain, tfm=tfm)
             va_h5 = _pick_h5_by_attrs(base_proc, "val",   encoder=encoder, T=T, gain=gain, tfm=tfm)
             te_h5 = _pick_h5_by_attrs(base_proc, "test",  encoder=encoder, T=T, gain=gain, tfm=tfm)
-            # ¡Aquí SÍ devolvemos DataLoaders desde H5!
             return make_loaders_from_h5(
                 train_h5=tr_h5, val_h5=va_h5, test_h5=te_h5,
                 batch_size=batch_size, seed=seed,
@@ -324,15 +327,26 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, gpu_encode: bo
                 prefetch_factor=dl_kwargs.get("prefetch_factor", 2),
             )
 
-        # --- Fallback: CSV (imágenes) con o sin runtime encode ---
+        # --- Fallback: CSV con/ sin runtime encode ---
         paths = task["paths"]
         base_raw = raw_root / run
-        encoder_for_loader = "image" if (gpu_encode and encoder in {"rate","latency","raw"}) else encoder
+
+        # ⚠️ RESOLVER A ABSOLUTO (clave si el notebook corre desde ./notebooks)
+        tr_csv = _abs(paths["train"])
+        va_csv = _abs(paths["val"])
+        te_csv = _abs(paths["test"])
+
+        # Guardarraíl útil: si falta algo, que lo diga con rutas absolutas
+        missing = [p for p in [tr_csv, va_csv, te_csv] if not p.exists()]
+        if missing:
+            raise FileNotFoundError(
+                f"CSV no encontrado: {missing}. CWD={Path.cwd()} ROOT={root}"
+            )
+
+        encoder_for_loader = "image" if (runtime_encode and encoder in {"rate","latency","raw"}) else encoder
         return make_loaders_from_csvs(
             base_dir=base_raw,
-            train_csv=Path(paths["train"]),
-            val_csv=Path(paths["val"]),
-            test_csv=Path(paths["test"]),
+            train_csv=tr_csv, val_csv=va_csv, test_csv=te_csv,
             batch_size=batch_size,
             encoder=encoder_for_loader,
             T=T, gain=gain, tfm=tfm, seed=seed,

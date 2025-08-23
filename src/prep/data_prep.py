@@ -242,11 +242,13 @@ def _write_tasks_json(proc_root: Path, runs: list[str], balanced: bool):
         base = proc_root / run
         tr = base / ("train_balanced.csv" if balanced else "train.csv")
         obj["splits"][run] = {
-            "train": str(tr),
-            "val":   str(base / "val.csv"),
-            "test":  str(base / "test.csv"),
+            "train": str((tr).resolve()),
+            "val":   str((base / "val.csv").resolve()),
+            "test":  str((base / "test.csv").resolve()),
         }
-    (proc_root / name).write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    (proc_root / name).write_text(
+        json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return proc_root / name
 
 

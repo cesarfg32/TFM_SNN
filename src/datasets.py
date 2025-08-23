@@ -167,7 +167,7 @@ class UdacityCSV(Dataset):
         self.base_dir = Path(base_dir)
         self.cfg = UdacityCSVConfig(encoder=encoder, T=int(T), gain=float(gain), camera=camera)
         self.aug = aug
-        self.tfm = tfm if tfm is not None else ImageTransform(160, 80, True, None)
+        self.tfm = tfm if tfm is not None else ImageTransform(200, 66, True, None)
         assert self.cfg.camera in ["center", "left", "right"], "camera debe ser center/left/right"
 
         df = pd.read_csv(self.csv_path)

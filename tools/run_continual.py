@@ -35,7 +35,7 @@ def main():
 
     ap.add_argument("--use-offline-spikes", action="store_true")
 
-    ap.add_argument("--model", default="snn_vision",
+    ap.add_argument("--model", default="pilotnet_snn",
                     choices=["snn_vision", "pilotnet_ann", "pilotnet_snn"])
     ap.add_argument("--img-w", type=int, default=None)
     ap.add_argument("--img-h", type=int, default=None)
@@ -62,7 +62,7 @@ def main():
     make_loader_fn = build_make_loader_fn(
         root=ROOT,
         use_offline_spikes=bool(args.use_offline_spikes),
-        gpu_encode=bool(runtime_encode),
+        runtime_encode=bool(runtime_encode),
     )
 
     # Mapear flags -> method_kwargs (igual que ya haces)

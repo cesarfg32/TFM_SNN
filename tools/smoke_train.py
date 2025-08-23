@@ -45,7 +45,7 @@ def main():
     model = SNNVisionRegressor(in_channels=1, lif_beta=0.95).to(device)
 
     # Datos sintéticos: (B,T,C,H,W) -> SNNVisionRegressor espera (T,B,C,H,W)
-    B, T, C, H, W = args.batch, args.T, 1, 80, 160
+    B, T, C, H, W = args.batch, args.T, 1, 66, 200
 
     loss_fn = nn.MSELoss()
     opt = optim.Adam(model.parameters(), lr=1e-3)
