@@ -12,7 +12,8 @@ if str(ROOT) not in sys.path:
 from src.runner import run_continual
 from src.datasets import ImageTransform
 from src.models import build_model, default_tfm_for_model
-from src.utils import make_loaders_from_csvs
+from src.utils import load_preset
+from src.utils import build_make_loader_fn
 
 def main():
     ap = argparse.ArgumentParser()
@@ -31,6 +32,8 @@ def main():
     ap.add_argument("--epochs-override", type=int, default=None)
     ap.add_argument("--out-root", default="outputs")
     ap.add_argument("--no-runtime-encode", action="store_true")
+
+    ap.add_argument("--use-offline-spikes", action="store_true")
 
     ap.add_argument("--model", default="snn_vision",
                     choices=["snn_vision", "pilotnet_ann", "pilotnet_snn"])
@@ -56,24 +59,13 @@ def main():
 
     # Loader factory que respeta runtime encode
     runtime_encode = (not args.no_runtime_encode)
+    make_loader_fn = build_make_loader_fn(
+        root=ROOT,
+        use_offline_spikes=bool(args.use_offline_spikes),
+        gpu_encode=bool(runtime_encode),
+    )
 
-    def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
-        RAW = Path("data") / "raw" / "udacity" / task["name"]
-        paths = task["paths"]
-        # Si runtime-encode está ON y el encoder temporal es rate/latency/raw, pedimos 4D (image)
-        encoder_for_loader = "image" if (runtime_encode and encoder in {"rate", "latency", "raw"}) else encoder
-        return make_loaders_from_csvs(
-            base_dir=RAW,
-            train_csv=Path(paths["train"]),
-            val_csv=Path(paths["val"]),
-            test_csv=Path(paths["test"]),
-            batch_size=batch_size,
-            encoder=encoder_for_loader,
-            T=T, gain=gain, tfm=tfm, seed=seed,
-            **dl_kwargs
-        )
-
-    # Mapear flags -> method_kwargs
+    # Mapear flags -> method_kwargs (igual que ya haces)
     method_kwargs = {}
     if args.method == "ewc":
         if args.lam is None:
@@ -81,13 +73,11 @@ def main():
         method_kwargs["lam"] = float(args.lam)
         if args.fisher_batches is not None:
             method_kwargs["fisher_batches"] = int(args.fisher_batches)
-
     elif args.method == "rehearsal":
         method_kwargs.update({
             "buffer_size": args.buffer_size,
             "replay_ratio": args.replay_ratio,
         })
-
     elif args.method == "rehearsal+ewc":
         if args.lam is None:
             raise SystemExit("Para --method rehearsal+ewc debes indicar --lam")
@@ -101,7 +91,7 @@ def main():
 
     out_dir, res = run_continual(
         task_list=task_list,
-        make_loader_fn=make_loader_fn,
+        make_loader_fn=make_loader_fn,   # <--- usa el builder unificado
         make_model_fn=make_model_fn,
         tfm=tfm,
         preset=args.preset,
@@ -111,7 +101,7 @@ def main():
         runtime_encode=runtime_encode,
         out_root=args.out_root,
         verbose=True,
-        method_kwargs=method_kwargs,   # <- único sitio
+        method_kwargs=method_kwargs,
     )
     print("OK:", out_dir)
 

@@ -225,3 +225,119 @@ def make_loaders_from_csvs(
         worker_init_fn=worker_fn,
     )
     return train_loader, val_loader, test_loader
+
+def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int,
+                      gain: float, tfm) -> Path:
+    """
+    Devuelve el .h5 compatible con los atributos pedidos:
+      - encoder ('rate'|'latency'|'raw')
+      - T
+      - gain (sólo se compara si encoder == 'rate')
+      - size_wh (w,h) y to_gray, deducidos del transform 'tfm'
+    """
+    import h5py
+    want_enc  = str(encoder).lower()
+    want_T    = int(T)
+    want_gain = float(gain) if want_enc == "rate" else 0.0
+    want_gray = bool(getattr(tfm, "to_gray", True))
+    want_size = (int(getattr(tfm, "w", 160)), int(getattr(tfm, "h", 80)))
+
+    candidates = sorted(base_proc.glob(f"{split}_*.h5"))
+    for f in candidates:
+        try:
+            with h5py.File(f, "r") as h5:
+                enc   = str(h5.attrs.get("encoder", "rate")).lower()
+                T_h   = int(h5.attrs.get("T", want_T))
+                size  = tuple(int(x) for x in h5.attrs.get("size_wh", want_size))
+                to_g  = bool(h5.attrs.get("to_gray", 1))
+                gain_h = float(h5.attrs.get("gain", 0.0))
+
+                ok = (enc == want_enc) and (T_h == want_T) and (size == want_size) and (to_g == want_gray)
+                if enc == "rate":
+                    ok = ok and (abs(gain_h - want_gain) < 1e-8)
+                if ok:
+                    return f
+        except Exception:
+            pass
+
+    raise FileNotFoundError(
+        f"No hay H5 compatible para split={split} en {base_proc}. "
+        f"Vistos: {[p.name for p in candidates]} | "
+        f"attrs requeridos: enc={want_enc}, T={want_T}, size={want_size}, "
+        f"to_gray={want_gray}, gain={want_gain}"
+    )
+
+from .datasets import H5SpikesDataset
+
+def make_loaders_from_h5(
+    train_h5: Path, val_h5: Path, test_h5: Path,
+    *, batch_size: int, seed: int | None,
+    num_workers: int = 4, pin_memory: bool = True,
+    persistent_workers: bool = True, prefetch_factor: int | None = 2
+):
+    """
+    Crea DataLoaders desde H5 (spikes offline). Devuelve (tr, va, te).
+    """
+    g = None
+    if seed is not None:
+        g = torch.Generator().manual_seed(int(seed))
+
+    def _mk(path: Path, shuffle: bool):
+        ds = H5SpikesDataset(path)
+        return DataLoader(
+            ds, batch_size=batch_size, shuffle=shuffle, generator=g,
+            num_workers=num_workers, pin_memory=pin_memory,
+            persistent_workers=(persistent_workers and num_workers > 0),
+            prefetch_factor=(prefetch_factor if (num_workers > 0) else None),
+            drop_last=False
+        )
+
+    return _mk(train_h5, True), _mk(val_h5, False), _mk(test_h5, False)
+
+
+def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, gpu_encode: bool):
+    """
+    Devuelve una función make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs)
+    que decide automáticamente entre:
+      - H5 (offline) -> usa make_loaders_from_h5
+      - CSV (imágenes) -> usa make_loaders_from_csvs con runtime encode si procede
+    """
+    proc_root = root / "data" / "processed"
+    raw_root  = root / "data" / "raw" / "udacity"
+
+    def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
+        run = task["name"]
+        base_proc = proc_root / run
+
+        # --- Ruta H5 offline por atributos ---
+        if use_offline_spikes and encoder in {"rate", "latency", "raw"}:
+            tr_h5 = _pick_h5_by_attrs(base_proc, "train", encoder=encoder, T=T, gain=gain, tfm=tfm)
+            va_h5 = _pick_h5_by_attrs(base_proc, "val",   encoder=encoder, T=T, gain=gain, tfm=tfm)
+            te_h5 = _pick_h5_by_attrs(base_proc, "test",  encoder=encoder, T=T, gain=gain, tfm=tfm)
+            # ¡Aquí SÍ devolvemos DataLoaders desde H5!
+            return make_loaders_from_h5(
+                train_h5=tr_h5, val_h5=va_h5, test_h5=te_h5,
+                batch_size=batch_size, seed=seed,
+                num_workers=dl_kwargs.get("num_workers", 4),
+                pin_memory=dl_kwargs.get("pin_memory", True),
+                persistent_workers=dl_kwargs.get("persistent_workers", True),
+                prefetch_factor=dl_kwargs.get("prefetch_factor", 2),
+            )
+
+        # --- Fallback: CSV (imágenes) con o sin runtime encode ---
+        paths = task["paths"]
+        base_raw = raw_root / run
+        encoder_for_loader = "image" if (gpu_encode and encoder in {"rate","latency","raw"}) else encoder
+        return make_loaders_from_csvs(
+            base_dir=base_raw,
+            train_csv=Path(paths["train"]),
+            val_csv=Path(paths["val"]),
+            test_csv=Path(paths["test"]),
+            batch_size=batch_size,
+            encoder=encoder_for_loader,
+            T=T, gain=gain, tfm=tfm, seed=seed,
+            **dl_kwargs
+        )
+
+    return make_loader_fn
+

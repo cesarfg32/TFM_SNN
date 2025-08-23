@@ -134,7 +134,7 @@ def stratified_split(
     train: float = 0.70,
     val: float = 0.15,
     seed: int = 42,
-    return_edges: bool = False,   # <--- nuevo
+    return_edges: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray]:
     """
     Split estratificado por histogramas de `steering` (pd.cut).
@@ -277,36 +277,41 @@ def run_prep(cfg: PrepConfig) -> dict:
 
     for run in cfg.runs:
         base = RAW / run
-        df = load_raw_log(base)
-        df.to_csv(PROC / run / "canonical.csv", index=False)
+        out_dir = PROC / run
+        out_dir.mkdir(parents=True, exist_ok=True)   # <-- AÑADIR ESTO
 
-        # expansión de cámaras (opcional)
+        df = load_raw_log(base)
+
+        # Guarda canonical en la carpeta ya creada
+        df.to_csv(out_dir / "canonical.csv", index=False)
+
+        # expansión opcional
         if cfg.use_left_right:
             df = expand_cameras_into_center(df, cfg.steer_shift)
 
         # split estratificado
         tr, va, te = stratified_split(df, bins=cfg.bins, train=cfg.train, val=cfg.val, seed=cfg.seed)
-        _write_splits(PROC / run, tr, va, te)
+        _write_splits(out_dir, tr, va, te)  # usa out_dir
 
-        # oversampling por bins en train (opcional si target auto o int > 0)
+        # balanceo opcional
         tr_balanced = make_balanced_by_bins(
             tr, bins=cfg.bins, target_per_bin=cfg.target_per_bin, cap_per_bin=cfg.cap_per_bin, seed=cfg.seed
         )
         if len(tr_balanced) > len(tr):
-            tr_balanced.to_csv(PROC / run / "train_balanced.csv", index=False)
+            tr_balanced.to_csv(out_dir / "train_balanced.csv", index=False)
 
         manifest["runs"][run] = {
-            "canonical": str(PROC / run / "canonical.csv"),
-            "train":     str(PROC / run / "train.csv"),
-            "val":       str(PROC / run / "val.csv"),
-            "test":      str(PROC / run / "test.csv"),
-            "train_balanced": str(PROC / run / "train_balanced.csv") if (PROC / run / "train_balanced.csv").exists() else None,
+            "canonical": str(out_dir / "canonical.csv"),
+            "train":     str(out_dir / "train.csv"),
+            "val":       str(out_dir / "val.csv"),
+            "test":      str(out_dir / "test.csv"),
+            "train_balanced": str(out_dir / "train_balanced.csv") if (out_dir / "train_balanced.csv").exists() else None,
             "stats": {
-                "n_canonical": int(len(pd.read_csv(PROC / run / "canonical.csv"))),
+                "n_canonical": int(len(pd.read_csv(out_dir / "canonical.csv"))),
                 "n_train":     int(len(tr)),
                 "n_val":       int(len(va)),
                 "n_test":      int(len(te)),
-                "n_train_balanced": int(len(tr_balanced)) if (PROC / run / "train_balanced.csv").exists() else None,
+                "n_train_balanced": int(len(tr_balanced)) if (out_dir / "train_balanced.csv").exists() else None,
             }
         }
 

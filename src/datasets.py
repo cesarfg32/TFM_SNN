@@ -298,3 +298,51 @@ class UdacityCSV(Dataset):
         X = self._encode(x_img)  # (T,C,H,W) o (C,H,W) si encoder='image'
         y_t = torch.tensor([y], dtype=torch.float32)
         return X, y_t
+
+# Dataset para H5 con spikes offline
+import h5py
+
+class H5SpikesDataset(Dataset):
+    """
+    Lee archivos H5 con estructura:
+      - Atributos: T, encoder, (gain), size_wh, to_gray
+      - Datasets:  'spikes'  (N, T, H, W)   o (N, T, C, H, W)
+                   'steering' (N,)
+    Devuelve: (x, y) con x -> (T, C, H, W) float32, y -> tensor([float32])
+    """
+    def __init__(self, h5_path: Path | str):
+        super().__init__()
+        self.h5_path = str(h5_path)
+        self._h5 = None
+        self._spikes = None
+        self._steer = None
+
+    def _ensure_open(self):
+        if self._h5 is None:
+            self._h5 = h5py.File(self.h5_path, "r")
+            self._spikes = self._h5["spikes"]
+            self._steer  = self._h5["steering"]
+
+    def __len__(self):
+        self._ensure_open()
+        return self._spikes.shape[0]
+
+    def __getitem__(self, i: int):
+        self._ensure_open()
+        x = self._spikes[i]  # (T,H,W) o (T,C,H,W)
+        if x.ndim == 3:      # (T,H,W) -> (T,1,H,W)
+            x = x[None, ...]           # (1,T,H,W)
+            x = x.transpose(1, 0, 2, 3) # (T,1,H,W)
+        x_t = torch.from_numpy(x)
+        if x_t.dtype == torch.uint8:
+            x_t = x_t.float()
+        y = float(self._steer[i])
+        y_t = torch.tensor([y], dtype=torch.float32)
+        return x_t, y_t
+
+    def close(self):
+        try:
+            if self._h5 is not None:
+                self._h5.close()
+        except Exception:
+            pass
