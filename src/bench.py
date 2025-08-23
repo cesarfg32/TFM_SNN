@@ -89,45 +89,43 @@ from torch import nn, optim
 from torch.amp import autocast, GradScaler
 
 import src.training as training
-from src.utils import make_loaders_from_csvs, set_seeds
+from src.utils import build_make_loader_fn, set_seeds
 
 # ---------- Loader factory para notebooks ----------
 def make_loader_fn_factory(
     ROOT: Path,
-    *,
-    RUNTIME_ENCODE: bool,
-    SEED: int,
-    num_workers: int,
-    prefetch_factor: int | None,
-    pin_memory: bool,
-    persistent_workers: bool,
-    aug_train=None,
-    use_online_balancing: bool,
+    **defaults  # ej. RUNTIME_ENCODE, SEED, num_workers, prefetch_factor, pin_memory, persistent_workers, aug_train, use_online_balancing, ...
 ):
-    """Devuelve un `make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs)`."""
-    def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
-        RAW = Path(ROOT) / "data" / "raw" / "udacity" / task["name"]
-        paths = task["paths"]
-        # Si vamos a codificar en GPU, el loader debe ser 4D (image)
-        encoder_for_loader = "image" if (RUNTIME_ENCODE and encoder in {"rate", "latency", "raw"}) else encoder
-        return make_loaders_from_csvs(
-            base_dir=RAW,
-            train_csv=Path(paths["train"]),
-            val_csv=Path(paths["val"]),
-            test_csv=Path(paths["test"]),
-            batch_size=batch_size,
-            encoder=encoder_for_loader,
-            T=T, gain=gain, tfm=tfm, seed=SEED,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=persistent_workers,
-            prefetch_factor=prefetch_factor,
-            aug_train=aug_train,
-            balance_train=(use_online_balancing and Path(paths["train"]).name != "train_balanced.csv"),
-            balance_bins=21,
-            balance_smooth_eps=1e-3,
+    """
+    Devuelve una función make_loader_fn(...) que usa el builder unificado de utils
+    y mezcla correctamente defaults del notebook con overrides de cada llamada,
+    sin duplicar num_workers/pin_memory/etc.
+    """
+    ROOT = Path(ROOT)
+
+    # Flags de codificación (soporta ambos nombres por compatibilidad del propio notebook)
+    use_offline_spikes = bool(defaults.pop("USE_OFFLINE_SPIKES", False))
+    runtime_encode     = bool(defaults.pop("RUNTIME_ENCODE", not use_offline_spikes))
+
+    # Mapea nombre antiguo a nuevo (si lo usan en el notebook)
+    if "use_online_balancing" in defaults:
+        uob = bool(defaults.pop("use_online_balancing"))
+        if uob:
+            defaults.setdefault("balance_train", True)
+
+    base_mk = build_make_loader_fn(
+        root=ROOT,
+        use_offline_spikes=use_offline_spikes,
+        runtime_encode=runtime_encode,
+    )
+
+    def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **overrides):
+        dl_kwargs = {**defaults, **overrides}  # utils filtrará lo que no toque
+        return base_mk(
+            task=task, batch_size=batch_size, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed,
             **dl_kwargs
         )
+
     return make_loader_fn
 
 # ---------- Prueba universal de forward con runtime encode si aplica ----------

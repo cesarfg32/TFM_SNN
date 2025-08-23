@@ -42,12 +42,15 @@ def set_seeds(seed: int = 42) -> None:
 # ---------------------------------------------------------------------
 # Presets de ejecución (fast/std/accurate) desde YAML
 # ---------------------------------------------------------------------
-def load_preset(path_yaml: Path, name: str):
-    """Carga un preset por nombre desde un YAML (p. ej., configs/presets.yaml)."""
+def load_preset(path_yaml: Path, name: str) -> dict:
     with open(path_yaml, "r", encoding="utf-8") as f:
         presets = yaml.safe_load(f)
     assert name in presets, f"Preset no encontrado: {name} en {path_yaml}"
-    return presets[name]
+    cfg = presets[name]
+    # Validación mínima
+    for k in ("model", "data", "optim", "continual", "naming"):
+        assert k in cfg, f"Preset '{name}' incompleto: falta '{k}'"
+    return cfg
 
 
 # ---------------------------------------------------------------------
@@ -239,8 +242,10 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int,
     want_enc  = str(encoder).lower()
     want_T    = int(T)
     want_gain = float(gain) if want_enc == "rate" else 0.0
+
+    assert hasattr(tfm, "w") and hasattr(tfm, "h"), "tfm debe exponer .w y .h"
+    want_size = (int(tfm.w), int(tfm.h))
     want_gray = bool(getattr(tfm, "to_gray", True))
-    want_size = (int(getattr(tfm, "w", 200)), int(getattr(tfm, "h", 66)))
 
     candidates = sorted(base_proc.glob(f"{split}_*.h5"))
     for f in candidates:
@@ -250,8 +255,7 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int,
                 T_h   = int(h5.attrs.get("T", want_T))
                 size  = tuple(int(x) for x in h5.attrs.get("size_wh", want_size))
                 to_g  = bool(h5.attrs.get("to_gray", 1))
-                gain_h = float(h5.attrs.get("gain", 0.0))
-
+                gain_h= float(h5.attrs.get("gain", 0.0))
                 ok = (enc == want_enc) and (T_h == want_T) and (size == want_size) and (to_g == want_gray)
                 if enc == "rate":
                     ok = ok and (abs(gain_h - want_gain) < 1e-8)
@@ -259,7 +263,6 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int,
                     return f
         except Exception:
             pass
-
     raise FileNotFoundError(
         f"No hay H5 compatible para split={split} en {base_proc}. "
         f"Vistos: {[p.name for p in candidates]} | "
@@ -296,12 +299,7 @@ def make_loaders_from_h5(
 
 
 def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, runtime_encode: bool):
-    """
-    Devuelve una función make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs)
-    que decide automáticamente entre:
-      - H5 (offline) -> usa make_loaders_from_h5
-      - CSV (imágenes) -> usa make_loaders_from_csvs con runtime encode si procede
-    """
+    """Devuelve make_loader_fn(...) que elige entre H5 offline o CSV+runtime encode."""
     proc_root = root / "data" / "processed"
     raw_root  = root / "data" / "raw" / "udacity"
 
@@ -309,49 +307,64 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, runtime_encode
         p = Path(p)
         return p if p.is_absolute() else (root / p)
 
+    # 🔒 claves permitidas para DataLoaders
+    DL_ALLOWED = {
+        "num_workers", "pin_memory", "persistent_workers", "prefetch_factor",
+        "shuffle_train", "aug_train",
+        "balance_train", "balance_bins", "balance_smooth_eps",
+    }
+
     def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
         run = task["name"]
         base_proc = proc_root / run
+        base_raw  = raw_root / run
 
-        # --- H5 offline (tal cual lo tienes) ---
+        # Normaliza kwargs del DataLoader (única fuente de verdad)
+        dl_kwargs = dict(dl_kwargs or {})
+
+        # normaliza y limpia kwargs
+        clean_dl = {k: v for k, v in dl_kwargs.items() if (k in DL_ALLOWED and v is not None)}
+        if int(clean_dl.get("num_workers", 0)) <= 0:
+            clean_dl["persistent_workers"] = False
+            clean_dl["prefetch_factor"] = None
+
+        # --- H5 offline (si está activado) ---
         if use_offline_spikes and encoder in {"rate", "latency", "raw"}:
-            tr_h5 = _pick_h5_by_attrs(base_proc, "train", encoder=encoder, T=T, gain=gain, tfm=tfm)
-            va_h5 = _pick_h5_by_attrs(base_proc, "val",   encoder=encoder, T=T, gain=gain, tfm=tfm)
-            te_h5 = _pick_h5_by_attrs(base_proc, "test",  encoder=encoder, T=T, gain=gain, tfm=tfm)
+            tr_h5 = _pick_h5_by_attrs(proc_root / run, "train", encoder=encoder, T=T, gain=gain, tfm=tfm)
+            va_h5 = _pick_h5_by_attrs(proc_root / run, "val",   encoder=encoder, T=T, gain=gain, tfm=tfm)
+            te_h5 = _pick_h5_by_attrs(proc_root / run, "test",  encoder=encoder, T=T, gain=gain, tfm=tfm)
             return make_loaders_from_h5(
                 train_h5=tr_h5, val_h5=va_h5, test_h5=te_h5,
                 batch_size=batch_size, seed=seed,
-                num_workers=dl_kwargs.get("num_workers", 4),
-                pin_memory=dl_kwargs.get("pin_memory", True),
-                persistent_workers=dl_kwargs.get("persistent_workers", True),
-                prefetch_factor=dl_kwargs.get("prefetch_factor", 2),
+                num_workers=clean_dl.get("num_workers", 4),
+                pin_memory=clean_dl.get("pin_memory", True),
+                persistent_workers=clean_dl.get("persistent_workers", True),
+                prefetch_factor=clean_dl.get("prefetch_factor", 2),
             )
 
-        # --- Fallback: CSV con/ sin runtime encode ---
-        paths = task["paths"]
+        # --- CSV (imágenes) con/ sin runtime encode ---
+        paths    = task["paths"]
         base_raw = raw_root / run
 
-        # ⚠️ RESOLVER A ABSOLUTO (clave si el notebook corre desde ./notebooks)
         tr_csv = _abs(paths["train"])
         va_csv = _abs(paths["val"])
         te_csv = _abs(paths["test"])
 
-        # Guardarraíl útil: si falta algo, que lo diga con rutas absolutas
-        missing = [p for p in [tr_csv, va_csv, te_csv] if not p.exists()]
+        missing = [p for p in (tr_csv, va_csv, te_csv) if not p.exists()]
         if missing:
-            raise FileNotFoundError(
-                f"CSV no encontrado: {missing}. CWD={Path.cwd()} ROOT={root}"
-            )
+            raise FileNotFoundError(f"CSV no encontrado: {missing}. CWD={Path.cwd()} ROOT={root}")
 
         encoder_for_loader = "image" if (runtime_encode and encoder in {"rate","latency","raw"}) else encoder
+
         return make_loaders_from_csvs(
             base_dir=base_raw,
             train_csv=tr_csv, val_csv=va_csv, test_csv=te_csv,
             batch_size=batch_size,
             encoder=encoder_for_loader,
             T=T, gain=gain, tfm=tfm, seed=seed,
-            **dl_kwargs
+            **clean_dl
         )
 
     return make_loader_fn
+
 

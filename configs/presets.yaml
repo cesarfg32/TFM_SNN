@@ -1,28 +1,95 @@
+# configs/presets.yaml
+defaults: &defaults
+  model: &defaults_model
+    name: pilotnet_snn           # snn_vision | pilotnet_ann | pilotnet_snn
+    img_w: 200
+    img_h: 66
+    to_gray: true
+
+  data: &defaults_data
+    encoder: rate                # rate | latency | raw | image
+    T: 10
+    gain: 0.5
+    use_offline_spikes: true     # si true → exige H5 compatibles
+    use_offline_balanced: false
+    encode_runtime: false        # == runtime encode (dejar false si usas H5)
+    seed: 42
+    num_workers: 8
+    prefetch_factor: 2
+    pin_memory: true
+    persistent_workers: true
+    aug_train: &aug_light        # augment “ligero”
+      prob_hflip: 0.5
+      brightness: null           # p.ej. [0.9, 1.1]
+      gamma: null                # p.ej. [0.95, 1.05]
+      noise_std: 0.0
+    balance_online: false        # sampler por bins en train
+    balance_bins: 21
+    balance_smooth_eps: 0.001
+
+  optim: &defaults_optim
+    amp: true
+    lr: 0.001
+    epochs: 2
+    es_patience: null
+    es_min_delta: null
+    batch_size: 64
+
+  continual: &defaults_continual
+    method: naive                # naive | ewc | rehearsal | rehearsal+ewc
+    params: {}                   # lam / fisher_batches / buffer_size / replay_ratio
+
+  naming: &defaults_naming
+    tag: ""                      # texto libre para el nombre de salida
+
 fast:
-  epochs: 2
-  batch_size: 64      # ← sube de 32 a 64 (T=10 permite más batch)
-  T: 10
-  gain: 0.5
-  encoder: rate
-  lr: 1.0e-3
-  amp: true
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 10
+  optim:
+    <<: *defaults_optim
+    epochs: 2
+    batch_size: 64
+  continual:
+    <<: *defaults_continual
+    method: naive
+    params: {}
 
 std:
-  epochs: 8
-  batch_size: 56      # ← sube de 48 a 56 (si cabe, luego prueba 64)
-  T: 16
-  gain: 0.5
-  encoder: rate
-  lr: 5.0e-4         # ↓ antes 7.5e-4
-  amp: true
-  es_patience: 3      # ← opcional
-  es_min_delta: 1e-4  # ← opcional
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 16
+  optim:
+    <<: *defaults_optim
+    lr: 0.0005
+    epochs: 8
+    batch_size: 56
+    es_patience: 3
+    es_min_delta: 1.0e-4
+  continual:
+    <<: *defaults_continual
+    method: ewc
+    params:
+      lam: 1.0e9
+      fisher_batches: 1000
 
 accurate:
-  epochs: 20
-  batch_size: 16
-  T: 30
-  gain: 0.5
-  encoder: rate
-  lr: 7.5e-4
-  amp: true
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 30
+  optim:
+    <<: *defaults_optim
+    lr: 7.5e-4
+    epochs: 20
+    batch_size: 16
+  continual:
+    <<: *defaults_continual
+    method: rehearsal+ewc
+    params:
+      buffer_size: 5000
+      replay_ratio: 0.2
+      lam: 1.0e9
+      fisher_batches: 1500

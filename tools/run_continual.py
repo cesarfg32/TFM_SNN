@@ -1,107 +1,59 @@
 # tools/run_continual.py
 from __future__ import annotations
-
-# --- asegurar raíz del repo en sys.path ---
-import sys, argparse, json
+import argparse, json
 from pathlib import Path
+import sys
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# ------------------------------------------
 
-from src.runner import run_continual
+from src.utils import load_preset, build_make_loader_fn
+from src.models import build_model
 from src.datasets import ImageTransform
-from src.models import build_model, default_tfm_for_model
-from src.utils import load_preset
-from src.utils import build_make_loader_fn
+from src.runner import run_continual
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--config", type=Path, default=Path("configs/presets.yaml"))
     ap.add_argument("--preset", required=True, choices=["fast","std","accurate"])
-    ap.add_argument("--method", required=True, choices=["naive","ewc","rehearsal","rehearsal+ewc"])
-    ap.add_argument("--lam", type=float, default=None)           # lam para EWC puro o +EWC
-    ap.add_argument("--fisher-batches", type=int, default=None)  # opcional
-    # Rehearsal
-    ap.add_argument("--buffer-size", type=int, default=10_000)
-    ap.add_argument("--replay-ratio", type=float, default=0.2)
-
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--encoder", default="rate",
-                    choices=["rate", "latency", "raw", "image"])
-    ap.add_argument("--tasks-file", default="data/processed/tasks_balanced.json")
-    ap.add_argument("--epochs-override", type=int, default=None)
-    ap.add_argument("--out-root", default="outputs")
-    ap.add_argument("--no-runtime-encode", action="store_true")
-
-    ap.add_argument("--use-offline-spikes", action="store_true")
-
-    ap.add_argument("--model", default="pilotnet_snn",
-                    choices=["snn_vision", "pilotnet_ann", "pilotnet_snn"])
-    ap.add_argument("--img-w", type=int, default=None)
-    ap.add_argument("--img-h", type=int, default=None)
-    ap.add_argument("--rgb", action="store_true")
+    ap.add_argument("--tasks-file", type=Path, default=Path("data/processed/tasks.json"))
+    ap.add_argument("--tag", default="", help="Etiqueta extra para el nombre de salida")
     args = ap.parse_args()
 
-    # Carga de tareas
-    tasks_json = json.loads(Path(args.tasks_file).read_text(encoding="utf-8"))
-    task_list = [{"name": n, "paths": tasks_json["splits"][n]}
-                 for n in tasks_json["tasks_order"]]
+    cfg = load_preset(args.config, args.preset)
+    if args.tag:
+        cfg.setdefault("naming", {})["tag"] = args.tag
 
-    # Transform por defecto o forzado
-    if args.img_w is None or args.img_h is None:
-        tfm = default_tfm_for_model(args.model, to_gray=(not args.rgb))
-    else:
-        tfm = ImageTransform(args.img_w, args.img_h, to_gray=(not args.rgb), crop_top=None)
+    # tfm desde preset
+    mw, mh, to_gray = cfg["model"]["img_w"], cfg["model"]["img_h"], cfg["model"]["to_gray"]
+    tfm = ImageTransform(mw, mh, to_gray, None)
 
-    # Factory del modelo
-    def make_model_fn(tfm):
-        return build_model(args.model, tfm, beta=0.9, threshold=0.5)
-
-    # Loader factory que respeta runtime encode
-    runtime_encode = (not args.no_runtime_encode)
+    # builder de loaders con flags del preset
+    use_offline_spikes = bool(cfg["data"]["use_offline_spikes"])
+    encode_runtime     = bool(cfg["data"]["encode_runtime"])
     make_loader_fn = build_make_loader_fn(
-        root=ROOT,
-        use_offline_spikes=bool(args.use_offline_spikes),
-        runtime_encode=bool(runtime_encode),
+        root=ROOT, use_offline_spikes=use_offline_spikes, encode_runtime=encode_runtime
     )
 
-    # Mapear flags -> method_kwargs (igual que ya haces)
-    method_kwargs = {}
-    if args.method == "ewc":
-        if args.lam is None:
-            raise SystemExit("Para --method ewc debes indicar --lam")
-        method_kwargs["lam"] = float(args.lam)
-        if args.fisher_batches is not None:
-            method_kwargs["fisher_batches"] = int(args.fisher_batches)
-    elif args.method == "rehearsal":
-        method_kwargs.update({
-            "buffer_size": args.buffer_size,
-            "replay_ratio": args.replay_ratio,
-        })
-    elif args.method == "rehearsal+ewc":
-        if args.lam is None:
-            raise SystemExit("Para --method rehearsal+ewc debes indicar --lam")
-        method_kwargs.update({
-            "buffer_size": args.buffer_size,
-            "replay_ratio": args.replay_ratio,
-            "lam": float(args.lam),
-        })
-        if args.fisher_batches is not None:
-            method_kwargs["fisher_batches"] = int(args.fisher_batches)
+    # tasks
+    with open(args.tasks_file, "r", encoding="utf-8") as f:
+        tasks_json = json.load(f)
+    task_list = [{"name": n, "paths": tasks_json["splits"][n]} for n in tasks_json["tasks_order"]]
 
-    out_dir, res = run_continual(
+    # factory de modelo
+    def make_model_fn(tfm):
+        return build_model(cfg["model"]["name"], tfm, beta=0.9, threshold=0.5)
+
+    out_dir, _ = run_continual(
         task_list=task_list,
-        make_loader_fn=make_loader_fn,   # <--- usa el builder unificado
+        make_loader_fn=make_loader_fn,
         make_model_fn=make_model_fn,
         tfm=tfm,
-        preset=args.preset,
-        method=args.method,
-        seed=args.seed,
-        encoder=args.encoder,
-        runtime_encode=runtime_encode,
-        out_root=args.out_root,
+        cfg=cfg,
+        preset_name=args.preset,
+        out_root=ROOT/"outputs",
         verbose=True,
-        method_kwargs=method_kwargs,
     )
     print("OK:", out_dir)
 
