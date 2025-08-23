@@ -1,10 +1,25 @@
 # src/prep/encode_offline.py
 from __future__ import annotations
 from pathlib import Path
+from datetime import datetime
+import json
 import numpy as np
 import pandas as pd
 import h5py
 import cv2
+
+def _upsert_prep_manifest(manifest_path: Path, key: str, entry: dict) -> None:
+    """Crea/actualiza prep_manifest.json sin borrar otras entradas (atomic write)."""
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    except Exception:
+        # Si está corrupto, re-inicializamos para no bloquear el pipeline
+        data = {}
+    data[key] = entry
+    tmp = manifest_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(manifest_path)
+
 
 def _imread_center(row, base_dir: Path, to_gray: bool, size_wh: tuple[int,int]) -> np.ndarray:
     """Lee la imagen 'center' del row, reescala y convierte a gris opcionalmente.
@@ -179,3 +194,31 @@ def encode_csv_to_h5(
                 d_spikes[i, :, :, :, :] = spk
 
             d_y[i] = float(row["steering"])
+
+    # === Manifest (upsert) ====================================================
+    # Clave de manifest: el nombre del archivo H5 en ese directorio
+    key = out_path.name
+    # CSV de origen como string legible
+    if isinstance(csv_df_or_path, (str, Path)):
+        src_csv_str = str(csv_df_or_path)
+    else:
+        src_csv_str = "<DataFrame>"
+
+    entry = {
+        "out_path": key,                 # clave == nombre del H5
+        "version": 2,                    # coincide con h5.attrs["version"]
+        "encoder": str(encoder),
+        "T": int(T),
+        "gain": float(gain) if encoder == "rate" else 0.0,
+        "size_wh": [int(W), int(H)],     # W,H (coherente con el resto del repo)
+        "to_gray": bool(to_gray),
+        "channels": int(channels),
+        "seed": int(seed),
+        "compression": str(compression),
+        "n_samples": int(N),
+        "source_csv": src_csv_str,
+        "base_dir": str(base_dir),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _upsert_prep_manifest(out_path.parent / "prep_manifest.json", key=key, entry=entry)
+
