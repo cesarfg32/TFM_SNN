@@ -63,6 +63,8 @@ fast:
     <<: *defaults_optim
     epochs: 2
     batch_size: 64
+    es_patience: 3
+    es_min_delta: 1.0e-4
   continual:
     <<: *defaults_continual
     method: naive
