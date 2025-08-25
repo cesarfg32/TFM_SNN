@@ -1,28 +1,29 @@
+# configs/presets.yaml
 defaults: &defaults
   model: &defaults_model
-    name: pilotnet_snn
+    name: pilotnet_snn           # snn_vision | pilotnet_ann | pilotnet_snn
     img_w: 200
     img_h: 66
     to_gray: true
 
   data: &defaults_data
-    encoder: rate
+    encoder: rate                # rate | latency | raw | image
     T: 10
     gain: 0.5
-    use_offline_spikes: true
+    use_offline_spikes: true     # si true → exige H5 compatibles
     use_offline_balanced: false
-    encode_runtime: false
+    encode_runtime: false        # == runtime encode (dejar false si usas H5)
     seed: 42
     num_workers: 8
     prefetch_factor: 2
     pin_memory: true
     persistent_workers: true
-    aug_train: &aug_light
+    aug_train: &aug_light        # augment “ligero”
       prob_hflip: 0.5
-      brightness: null
-      gamma: null
+      brightness: null           # p.ej. [0.9, 1.1]
+      gamma: null                # p.ej. [0.95, 1.05]
       noise_std: 0.0
-    balance_online: false
+    balance_online: false        # sampler por bins en train
     balance_bins: 21
     balance_smooth_eps: 0.001
 
@@ -35,11 +36,11 @@ defaults: &defaults
     batch_size: 64
 
   continual: &defaults_continual
-    method: naive
-    params: {}
+    method: naive                # naive | ewc | rehearsal | rehearsal+ewc
+    params: {}                   # lam / fisher_batches / buffer_size / replay_ratio
 
   naming: &defaults_naming
-    tag: ""
+    tag: ""                      # texto libre para el nombre de salida
 
   # parámetros por defecto del preprocesado/balanceo
   prep: &defaults_prep
@@ -66,10 +67,6 @@ fast:
     <<: *defaults_continual
     method: naive
     params: {}
-  # 👇 NUEVO: hereda prep por defecto; puedes sobrescribir si quieres
-  prep:
-    <<: *defaults_prep
-    # p.ej. bins: 19
 
 std:
   <<: *defaults
@@ -89,8 +86,6 @@ std:
     params:
       lam: 1.0e9
       fisher_batches: 1000
-  prep:
-    <<: *defaults_prep
 
 accurate:
   <<: *defaults
@@ -110,5 +105,3 @@ accurate:
       replay_ratio: 0.2
       lam: 1.0e9
       fisher_batches: 1500
-  prep:
-    <<: *defaults_prep
