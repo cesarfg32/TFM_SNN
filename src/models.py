@@ -1,4 +1,5 @@
-# -*- coding: utf-8 -*-
+# src/models.py
+# # -*- coding: utf-8 -*-
 """Backbone SNN para regresión de dirección (steering).
 
 Diseño híbrido ligero:

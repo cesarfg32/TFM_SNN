@@ -1,4 +1,5 @@
-# -*- coding: utf-8 -*-
+# src/utils.py
+# # -*- coding: utf-8 -*-
 """
 Utilidades comunes del proyecto TFM_SNN.
 

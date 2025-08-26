@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 import random
+import math
 import numpy as np
 import pandas as pd
 import torch
@@ -111,8 +112,12 @@ class AugmentConfig:
     """Config de augmentación para UdacityCSV (solo en train)."""
     prob_hflip: float = 0.0
     brightness: Optional[Tuple[float, float]] = None
-    gamma: Optional[Tuple[float, float]] = None
-    noise_std: float = 0.0
+    contrast:   Optional[Tuple[float, float]] = None
+    saturation: Optional[Tuple[float, float]] = None
+    hue:        Optional[Tuple[float, float]] = None   # en radianes aprox. [-0.1, 0.1]~±5.7°
+    gamma:      Optional[Tuple[float, float]] = None
+    noise_std:  float = 0.0
+
 
 # -----------------------------
 # Codificadores (CPU, para usar en Dataset si hace falta)
@@ -255,22 +260,65 @@ class UdacityCSV(Dataset):
     def _apply_augmentation(self, x_img: torch.Tensor, y: float) -> tuple[torch.Tensor, float]:
         if self.aug is None:
             return x_img, y
+
+        # brillo
         if self.aug.brightness is not None:
             lo, hi = self.aug.brightness
-            if hi > 0 and hi != 1.0:
-                factor = random.uniform(float(lo), float(hi))
-                x_img = (x_img * factor).clamp_(0.0, 1.0)
+            factor = float(random.uniform(float(lo), float(hi)))
+            x_img = (x_img * factor).clamp_(0.0, 1.0)
+
+        # contraste (por canal)
+        if self.aug.contrast is not None:
+            lo, hi = self.aug.contrast
+            c = float(random.uniform(float(lo), float(hi)))
+            mean = x_img.mean(dim=(1,2), keepdim=True)
+            x_img = ((x_img - mean) * c + mean).clamp_(0.0, 1.0)
+
+        # saturación/hue: solo si RGB (C=3)
+        if (self.aug.saturation is not None or self.aug.hue is not None) and x_img.shape[0] == 3:
+            # RGB -> YUV (aprox)
+            R, G, B = x_img[0], x_img[1], x_img[2]
+            Y = 0.299*R + 0.587*G + 0.114*B
+            U = 0.492*(B - Y)
+            V = 0.877*(R - Y)
+
+            # saturación: escala U,V
+            if self.aug.saturation is not None:
+                lo, hi = self.aug.saturation
+                s = float(random.uniform(float(lo), float(hi)))
+                U = U * s
+                V = V * s
+
+            # hue: rotación en el plano (U,V)
+            if self.aug.hue is not None:
+                lo, hi = self.aug.hue
+                theta = float(random.uniform(float(lo), float(hi)))
+                cos_t = math.cos(theta); sin_t = math.sin(theta)
+                U_, V_ = U*cos_t - V*sin_t, U*sin_t + V*cos_t
+                U, V = U_, V_
+
+            # YUV -> RGB (aprox inversa)
+            R2 = (Y + 1.14*V).clamp(0.0, 1.0)
+            B2 = (Y + 2.032*U).clamp(0.0, 1.0)
+            G2 = (Y - 0.395*U - 0.581*V).clamp(0.0, 1.0)
+            x_img = torch.stack([R2, G2, B2], dim=0)
+
+        # gamma
         if self.aug.gamma is not None:
             g_lo, g_hi = self.aug.gamma
-            if g_hi > 0:
-                gamma = max(1e-6, random.uniform(float(g_lo), float(g_hi)))
-                x_img = x_img.pow(gamma).clamp_(0.0, 1.0)
+            gamma = max(1e-6, float(random.uniform(float(g_lo), float(g_hi))))
+            x_img = x_img.pow(gamma).clamp_(0.0, 1.0)
+
+        # ruido
         if self.aug.noise_std and self.aug.noise_std > 0:
             noise = torch.randn_like(x_img) * float(self.aug.noise_std)
             x_img = (x_img + noise).clamp_(0.0, 1.0)
+
+        # flip horizontal (corrige etiqueta)
         if self.aug.prob_hflip > 0 and random.random() < self.aug.prob_hflip:
-            x_img = torch.flip(x_img, dims=[2])  # invierte ancho
+            x_img = torch.flip(x_img, dims=[2])
             y = -float(y)
+
         return x_img, y
 
     # ---------- API Dataset ----------

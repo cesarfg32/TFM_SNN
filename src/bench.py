@@ -273,9 +273,9 @@ def disable_epoch_ips():
     training.train_supervised = _ORIG_TRAIN
     _ORIG_TRAIN = None
 
-def print_bench_config(*, NUM_WORKERS, PREFETCH, PIN_MEMORY, PERSISTENT, USE_OFFLINE_BALANCED, USE_ONLINE_BALANCING):
+def print_bench_config(*, NUM_WORKERS, PREFETCH, PIN_MEMORY, PERSISTENT, USE_ONLINE_BALANCING):
     print(
         f"[Bench workers={NUM_WORKERS} prefetch={PREFETCH} "
         f"pin={PIN_MEMORY} persistent={PERSISTENT} | "
-        f"offline_bal={USE_OFFLINE_BALANCED} online_bal={USE_ONLINE_BALANCING}"
+        f"online_bal={USE_ONLINE_BALANCING}"
     )

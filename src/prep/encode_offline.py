@@ -21,16 +21,24 @@ def _upsert_prep_manifest(manifest_path: Path, key: str, entry: dict) -> None:
     tmp.replace(manifest_path)
 
 
-def _imread_center(row, base_dir: Path, to_gray: bool, size_wh: tuple[int,int]) -> np.ndarray:
-    """Lee la imagen 'center' del row, reescala y convierte a gris opcionalmente.
-    Devuelve HxW (gris) o HxWx3 (RGB) en float32 [0,1].
+def _imread_center_mixed(row, base_raw: Path, base_proc: Path, to_gray: bool, size_wh: tuple[int,int]) -> np.ndarray:
+    """Lee la imagen indicada en row['center'] resolviendo:
+       - 'aug/train/...'  -> bajo processed/<run>
+       - 'IMG/...'/otras  -> bajo raw/<run>
+       Devuelve HxW (gris) o HxWx3 (RGB) en float32 [0,1].
     """
-    # Admite rutas tipo "IMG/xxx.jpg"
-    p = (base_dir / str(row["center"])).resolve()
+    rel = str(row["center"]).replace("\\", "/").lstrip("/")
+    # Heurística: si empieza por 'aug/' usamos processed; si no, raw
+    root = base_proc if rel.lower().startswith("aug/") else base_raw
+    p = (root / rel).resolve()
+
     img = cv2.imread(str(p), cv2.IMREAD_COLOR)
     if img is None:
         raise FileNotFoundError(f"No se pudo leer: {p}")
-    img = cv2.resize(img, size_wh, interpolation=cv2.INTER_AREA)  # size_wh = (W, H)
+
+    W, H = size_wh  # nota: en este módulo usamos (W,H)
+    img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+
     if to_gray:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # HxW
         img = img.astype(np.float32) / 255.0
@@ -38,6 +46,7 @@ def _imread_center(row, base_dir: Path, to_gray: bool, size_wh: tuple[int,int]) 
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)   # HxWx3
         img = img.astype(np.float32) / 255.0
     return img
+
 
 def _encode_rate(img01: np.ndarray, T: int, gain: float, rng: np.random.Generator) -> np.ndarray:
     """Rate coding: Bernoulli(gain*I) por paso temporal.
@@ -130,7 +139,16 @@ def encode_csv_to_h5(
     W, H = int(size_wh[0]), int(size_wh[1])
 
     # Detecta canales
-    first = _imread_center(df.iloc[0], base_dir, to_gray=to_gray, size_wh=(W, H))
+    # Detecta carpeta processed/<run> a partir del CSV si es una ruta de archivo
+    if isinstance(csv_df_or_path, (str, Path)):
+        proc_dir_for_csv = Path(csv_df_or_path).parent
+    else:
+        # Si vino un DataFrame, asumimos 'base_dir' como raw y usamos el mismo como fallback de proc
+        proc_dir_for_csv = base_dir
+
+    first = _imread_center_mixed(df.iloc[0], base_raw=base_dir, base_proc=proc_dir_for_csv,
+                                to_gray=to_gray, size_wh=(W, H))
+
     channels = 1 if first.ndim == 2 else first.shape[2]
 
     N = len(df)
@@ -175,7 +193,8 @@ def encode_csv_to_h5(
 
         # Escribir por lotes (aquí fila a fila para simplicidad y memoria acotada)
         for i, row in df.iterrows():
-            img01 = _imread_center(row, base_dir, to_gray=to_gray, size_wh=(W, H))
+            img01 = _imread_center_mixed(row, base_raw=base_dir, base_proc=proc_dir_for_csv,
+                             to_gray=to_gray, size_wh=(W, H))
             if encoder == "rate":
                 spk = _encode_rate(img01, T=T, gain=gain, rng=rng)
             elif encoder == "raw":
@@ -217,7 +236,8 @@ def encode_csv_to_h5(
         "compression": str(compression),
         "n_samples": int(N),
         "source_csv": src_csv_str,
-        "base_dir": str(base_dir),
+        "base_dir_raw": str(base_dir),
+        "base_dir_proc": str(proc_dir_for_csv),
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
     _upsert_prep_manifest(out_path.parent / "prep_manifest.json", key=key, entry=entry)

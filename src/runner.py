@@ -1,4 +1,5 @@
 # src/runner.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 from pathlib import Path
 import sys, json, torch

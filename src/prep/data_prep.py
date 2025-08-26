@@ -33,6 +33,7 @@ Uso CLI recomendado desde la raíz del repo:
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from typing import Optional, Union
 import argparse, json
 import numpy as np
 import pandas as pd
@@ -264,8 +265,8 @@ class PrepConfig:
     train: float
     val: float
     seed: int
-    target_per_bin: str | int
-    cap_per_bin: int | None
+    target_per_bin: Optional[Union[str, int]] = None
+    cap_per_bin: Optional[int] = None
 
 def run_prep(cfg: PrepConfig) -> dict:
     RAW  = cfg.root / "data" / "raw" / "udacity"
@@ -276,59 +277,57 @@ def run_prep(cfg: PrepConfig) -> dict:
         "config": asdict(cfg),
         "runs": {},
     }
-
     for run in cfg.runs:
         base = RAW / run
         out_dir = PROC / run
-        out_dir.mkdir(parents=True, exist_ok=True)   # <-- AÑADIR ESTO
+        out_dir.mkdir(parents=True, exist_ok=True)
 
         df = load_raw_log(base)
-
-        # Guarda canonical en la carpeta ya creada
         df.to_csv(out_dir / "canonical.csv", index=False)
 
-        # expansión opcional
         if cfg.use_left_right:
             df = expand_cameras_into_center(df, cfg.steer_shift)
 
-        # split estratificado
         tr, va, te = stratified_split(df, bins=cfg.bins, train=cfg.train, val=cfg.val, seed=cfg.seed)
-        _write_splits(out_dir, tr, va, te)  # usa out_dir
+        _write_splits(out_dir, tr, va, te)
 
-        # balanceo opcional
-        tr_balanced = make_balanced_by_bins(
-            tr, bins=cfg.bins, target_per_bin=cfg.target_per_bin, cap_per_bin=cfg.cap_per_bin, seed=cfg.seed
-        )
-        if len(tr_balanced) > len(tr):
-            tr_balanced.to_csv(out_dir / "train_balanced.csv", index=False)
+        # === SOLO si se pide balanceo por duplicación de filas (LEGACY) ===
+        trb_path = None
+        if cfg.target_per_bin not in (None, "none", ""):
+            tr_balanced = make_balanced_by_bins(
+                tr,
+                bins=cfg.bins,
+                target_per_bin=cfg.target_per_bin,
+                cap_per_bin=cfg.cap_per_bin,
+                seed=cfg.seed
+            )
+            if len(tr_balanced) > len(tr):
+                trb_path = out_dir / "train_balanced.csv"
+                tr_balanced.to_csv(trb_path, index=False)
 
         manifest["runs"][run] = {
             "canonical": str(out_dir / "canonical.csv"),
             "train":     str(out_dir / "train.csv"),
             "val":       str(out_dir / "val.csv"),
             "test":      str(out_dir / "test.csv"),
-            "train_balanced": str(out_dir / "train_balanced.csv") if (out_dir / "train_balanced.csv").exists() else None,
+            "train_balanced": str(trb_path) if trb_path else None,
             "stats": {
                 "n_canonical": int(len(pd.read_csv(out_dir / "canonical.csv"))),
                 "n_train":     int(len(tr)),
                 "n_val":       int(len(va)),
                 "n_test":      int(len(te)),
-                "n_train_balanced": int(len(tr_balanced)) if (out_dir / "train_balanced.csv").exists() else None,
+                "n_train_balanced": (int(len(pd.read_csv(trb_path))) if trb_path else None),
             }
         }
 
-    # tasks.json (normal) y tasks_balanced.json (si procede)
     tasks_path = _write_tasks_json(PROC, cfg.runs, balanced=False)
     balanced_exists = all((PROC / run / "train_balanced.csv").exists() for run in cfg.runs)
-    tasks_balanced_path = None
-    if balanced_exists:
-        tasks_balanced_path = _write_tasks_json(PROC, cfg.runs, balanced=True)
+    tasks_balanced_path = _write_tasks_json(PROC, cfg.runs, balanced=True) if balanced_exists else None
 
     manifest["outputs"] = {
         "tasks_json": str(tasks_path),
         "tasks_balanced_json": str(tasks_balanced_path) if tasks_balanced_path else None,
     }
-
     (PROC / "prep_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False, default=_json_default),
         encoding="utf-8"
