@@ -16,7 +16,14 @@ def main():
     ap.add_argument("--preset", required=True, choices=["fast","std","accurate"])
     ap.add_argument("--config", default=str(ROOT / "configs" / "presets.yaml"))
     ap.add_argument("--tasks-file", default=None, help="Override: ruta a tasks.json / tasks_balanced.json")
+    ap.add_argument("--only-missing", action="store_true", default=True,
+                    help="No sobrescribe si el H5 ya existe (por defecto ON).")
+    ap.add_argument("--overwrite", action="store_true", default=False,
+                    help="Forzar sobrescritura (incompatible con --only-missing).")
     args = ap.parse_args()
+ 
+    if args.overwrite and args.only_missing:
+        raise SystemExit("Usa --overwrite *o* --only-missing, pero no ambos.")
 
     cfg = load_preset(Path(args.config), args.preset)
     data = cfg["data"]; model = cfg["model"]; prep = cfg.get("prep", {})
@@ -47,6 +54,11 @@ def main():
             suffix_gain = (gain if enc=="rate" else 0)
             color = "gray" if to_gray else "rgb"
             out = outdir / f"{split}_{enc}_T{T}_gain{suffix_gain}_{color}_{mw}x{mh}.h5"
+            if args.only_missing and out.exists():
+                print(f"✓ Ya existe, omito: {out.name}")
+                continue
+            if args.overwrite and out.exists():
+                out.unlink(missing_ok=True)
             encode_csv_to_h5(
                 csv_df_or_path=csv, base_dir=base, out_path=out,
                 encoder=enc, T=T, gain=gain, size_wh=(mw, mh),

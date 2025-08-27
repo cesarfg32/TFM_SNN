@@ -45,8 +45,8 @@ def main():
         train=float(prep.get("train", 0.70)),
         val=float(prep.get("val", 0.15)),
         seed=int(prep.get("seed", 42)),
-        target_per_bin=None,   # <==== DESACTIVA duplicación de filas
-        cap_per_bin=int(prep.get("balance_offline", {}).get("cap_per_bin", 12000)),
+        target_per_bin=None,   # desactiva duplicación de filas (LEGACY)
+        cap_per_bin=None,      # irrelevante cuando target_per_bin=None
     )
     manifest = run_prep(pcfg)  # ← genera canonical + train/val/test + tasks.json
     tasks_json_path = PROC / prep.get("tasks_file_name", "tasks.json")

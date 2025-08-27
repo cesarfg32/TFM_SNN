@@ -6,41 +6,35 @@ defaults: &defaults
     to_gray: true
 
   data: &defaults_data
-    # === MODO DATOS EN ENTRENAMIENTO ===
-    use_offline_spikes: true      # true: leer H5; false: leer CSV y codificar en runtime
-    encode_runtime: false         # true si entrenas desde CSV
+    use_offline_spikes: true      # H5
+    encode_runtime: false         # codificación en GPU si use_offline_spikes=false
     seed: 42
     num_workers: 8
     prefetch_factor: 2
     pin_memory: true
     persistent_workers: true
 
-    # Codificación temporal (afecta offline y online)
     encoder: rate                 # rate | latency | raw | image
     T: 10
     gain: 0.5
 
-    # Balanceo/augment EN TIEMPO DE ENTRENAMIENTO (ONLINE)
-    balance_online: false         # si true: sampler por bins en train
-    balance_bins: 21
+    balance_online: false
+    balance_bins: 50            # null ⇒ hereda de prep.bins cuando balance_online=true
     balance_smooth_eps: 0.001
-    aug_train: null               # o {prob_hflip: 0.5, brightness: [0.9,1.1], ...}
+    aug_train: null
 
-  # === PREPARACIÓN DE DATOS (OFFLINE) ===
   prep: &defaults_prep
-    runs: []                      # si vacío → autodetecta en RAW
+    runs: []
     use_left_right: true
     steer_shift: 0.2
     bins: 21
     train: 0.70
     val: 0.15
     seed: 42
-
-    # Balanceo offline (con IMÁGENES AUMENTADAS reales)
     balance_offline:
-      mode: images                # images | none  (evitamos 'csv_dup')
-      target_per_bin: auto        # "auto" (=max_bin con techo) o entero
-      cap_per_bin: 12000          # techo cuando auto
+      mode: images                # images | none
+      target_per_bin: auto
+      cap_per_bin: 12000
       aug:
         prob_hflip: 0.5
         brightness: [0.8, 1.2]
@@ -49,20 +43,17 @@ defaults: &defaults
         hue:        [-0.1, 0.1]
         gamma: null
         noise_std: 0.0
-    tasks_file_name: tasks.json           # notebook QC
+    tasks_file_name: tasks.json
     tasks_balanced_file_name: tasks_balanced.json
 
-  # === Codificación a H5 (OFFLINE) ===
   encode_offline: &defaults_encode
-    enabled: true                 # si true, tras el prep balanceado generamos H5
-    use_balanced_tasks: true      # si true usa tasks_balanced.json; si false tasks.json
+    enabled: true                 # se puede ignorar y usar --encode en CLI
+    use_balanced_tasks: true
 
   optim: &defaults_optim
     amp: true
     lr: 0.001
     epochs: 2
-    es_patience: null
-    es_min_delta: null
     batch_size: 64
 
   continual: &defaults_continual
@@ -74,60 +65,3 @@ defaults: &defaults
 
 fast:
   <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 10
-  optim:
-    <<: *defaults_optim
-    epochs: 2
-    batch_size: 64
-  prep:
-    <<: *defaults_prep
-  encode_offline:
-    <<: *defaults_encode
-
-std:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 16
-  optim:
-    <<: *defaults_optim
-    lr: 0.0005
-    epochs: 8
-    batch_size: 56
-    es_patience: 3
-    es_min_delta: 1.0e-4
-  continual:
-    <<: *defaults_continual
-    method: ewc
-    params:
-      lam: 1.0e9
-      fisher_batches: 1000
-  prep:
-    <<: *defaults_prep
-  encode_offline:
-    <<: *defaults_encode
-
-accurate:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 30
-  optim:
-    <<: *defaults_optim
-    lr: 7.5e-4
-    epochs: 20
-    batch_size: 16
-  continual:
-    <<: *defaults_continual
-    method: rehearsal+ewc
-    params:
-      buffer_size: 5000
-      replay_ratio: 0.2
-      lam: 1.0e9
-      fisher_batches: 1500
-  prep:
-    <<: *defaults_prep
-  encode_offline:
-    <<: *defaults_encode

@@ -47,8 +47,12 @@ def run_continual(
         dl_kwargs["aug_train"] = AugmentConfig(**data["aug_train"])
     # balanceo online
     if data.get("balance_online", False):
-        dl_kwargs["balance_train"]      = True
-        dl_kwargs["balance_bins"]       = int(data.get("balance_bins", 21))
+        dl_kwargs["balance_train"] = True
+        # Hereda de prep.bins si balance_bins es None
+        bb = data.get("balance_bins", None)
+        if bb is None:
+            bb = int(cfg.get("prep", {}).get("bins", 21))
+        dl_kwargs["balance_bins"] = int(bb)
         dl_kwargs["balance_smooth_eps"] = float(data.get("balance_smooth_eps", 1e-3))
 
     # Modelo

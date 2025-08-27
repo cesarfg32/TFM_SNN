@@ -25,13 +25,10 @@ def main():
     ap.add_argument("--h", type=int, default=66)
     ap.add_argument("--rgb", action="store_true", help="Por defecto gris; si pasas --rgb, to_gray=False")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--only-missing", action="store_true", help="No sobreescribir si ya existe (por defecto ON)")
-    ap.add_argument("--overwrite", action="store_true", help="Forzar sobrescritura (incompatible con --only-missing)")
+    ap.add_argument("--overwrite", action="store_true", default=False,
+                    help="Forzar sobrescritura. Si no se indica, no sobrescribe.")
 
     args = ap.parse_args()
-
-    if args.overwrite and args.only_missing:
-        raise SystemExit("Usa --overwrite *o* --only-missing, pero no ambos.")
 
     tasks = json.loads(Path(args.tasks_file).read_text(encoding="utf-8"))
     runs = tasks["tasks_order"]
@@ -65,7 +62,10 @@ def main():
                 print(f"✓ Ya existe, omito: {out_path.name}")
                 continue
 
-            if args.overwrite and out_path.exists():
+            if out_path.exists():
+                if not args.overwrite:
+                    print(f"✓ Ya existe, omito: {out_path.name}")
+                    continue
                 out_path.unlink(missing_ok=True)
 
             print(f"[{run}] {split} -> {out_name}")

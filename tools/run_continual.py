@@ -17,7 +17,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, default=Path("configs/presets.yaml"))
     ap.add_argument("--preset", required=True, choices=["fast","std","accurate"])
-    ap.add_argument("--tasks-file", type=Path, default=Path("data/processed/tasks.json"))
+    ap.add_argument("--tasks-file", type=Path, default=None,
+                    help="Por defecto: usa tasks_balanced.json si existe; si no, tasks.json")
     ap.add_argument("--tag", default="", help="Etiqueta extra para el nombre de salida")
     args = ap.parse_args()
 
@@ -36,8 +37,14 @@ def main():
         root=ROOT, use_offline_spikes=use_offline_spikes, encode_runtime=encode_runtime
     )
 
-    # tasks
-    with open(args.tasks_file, "r", encoding="utf-8") as f:
+    # tasks: autodetección si no se pasa --tasks-file
+    if args.tasks_file and args.tasks_file.exists():
+        tasks_path = args.tasks_file
+    else:
+        tb = ROOT/"data/processed/tasks_balanced.json"
+        tasks_path = tb if tb.exists() else ROOT/"data/processed/tasks.json"
+
+    with open(tasks_path, "r", encoding="utf-8") as f:
         tasks_json = json.load(f)
     task_list = [{"name": n, "paths": tasks_json["splits"][n]} for n in tasks_json["tasks_order"]]
 
