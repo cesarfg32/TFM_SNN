@@ -116,6 +116,10 @@ def train_supervised(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # rutas de checkpoints
+    best_ckpt = out_dir / "best.pth"
+    last_ckpt = out_dir / "last.pth"
+
     if cfg.seed is not None:
         set_seeds(cfg.seed)
 
@@ -181,22 +185,30 @@ def train_supervised(
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
 
-        # Early stopping (opcional)
+        # guarda "last" cada epoch
+        torch.save(model.state_dict(), last_ckpt)
+
+        # Early stopping (y "best")
         if patience_left is not None:
             improved = (best_val - val_loss) > cfg.es_min_delta
             if improved:
                 best_val = val_loss
                 patience_left = cfg.es_patience
+                # además de mantener best_state en memoria, lo guardamos a disco
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                torch.save(best_state, best_ckpt)  # guarda best
             else:
                 patience_left -= 1
                 if patience_left <= 0:
-                    # restaura mejor estado y corta
                     if best_state is not None:
                         model.load_state_dict(best_state)
                     break
 
     elapsed = time.time() - t0
+
+    # Si no hubo mejora nunca, al menos guarda best = last
+    if not best_ckpt.exists():
+        torch.save(model.state_dict(), best_ckpt)
 
     # Manifest con metadatos
     manifest = {
@@ -213,6 +225,10 @@ def train_supervised(
             "patience": cfg.es_patience,
             "min_delta": cfg.es_min_delta,
             "best_val": best_val if best_val != float("inf") else None,
+        },
+        "checkpoints": {
+            "best": str(best_ckpt),
+            "last": str(last_ckpt),
         },
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
