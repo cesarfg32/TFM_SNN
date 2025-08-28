@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys, json, torch
 from typing import Dict, Any
-from src.training import TrainConfig, train_supervised, set_runtime_encode
+from src.training import TrainConfig, train_supervised, set_encode_runtime
 from src.methods.registry import build_method
 from src.eval import eval_loader
 
@@ -100,7 +100,7 @@ def run_continual(
         xb_sample, _ = next(iter(tr))
         used_rt = False
         if xb_sample.ndim == 4:
-            set_runtime_encode(mode=encoder, T=T, gain=gain, device=device)
+            set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
             used_rt = True
             if verbose: print("  runtime encode: ON (GPU)")
 
@@ -121,7 +121,7 @@ def run_continual(
             results[pname][f"after_{name}_mse"] = p_mse
 
         if used_rt:
-            set_runtime_encode(None)
+            set_encode_runtime(None)
             if verbose: print("  runtime encode: OFF")
 
     (out_dir / "continual_results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")

@@ -21,7 +21,7 @@ import yaml
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from torch.utils.data.sampler import WeightedRandomSampler
+from torch.utils.data import WeightedRandomSampler
 
 from .datasets import UdacityCSV, ImageTransform, AugmentConfig
 
@@ -299,7 +299,7 @@ def make_loaders_from_h5(
     return _mk(train_h5, True), _mk(val_h5, False), _mk(test_h5, False)
 
 
-def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, runtime_encode: bool):
+def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime: bool):
     """Devuelve make_loader_fn(...) que elige entre H5 offline o CSV+runtime encode."""
     proc_root = root / "data" / "processed"
     raw_root  = root / "data" / "raw" / "udacity"
@@ -355,7 +355,7 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, runtime_encode
         if missing:
             raise FileNotFoundError(f"CSV no encontrado: {missing}. CWD={Path.cwd()} ROOT={root}")
 
-        encoder_for_loader = "image" if (runtime_encode and encoder in {"rate","latency","raw"}) else encoder
+        encoder_for_loader = "image" if (encode_runtime and encoder in {"rate","latency","raw"}) else encoder
 
         return make_loaders_from_csvs(
             base_dir=base_raw,

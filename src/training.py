@@ -19,7 +19,7 @@ from .utils import set_seeds  # reproducibilidad global
 # ---------------------------------------------------------------------
 _RUNTIME_ENC = {"mode": None, "T": None, "gain": None, "device": torch.device("cpu")}
 
-def set_runtime_encode(mode: str | None, T: int | None = None, gain: float | None = None, device=None):
+def set_encode_runtime(mode: str | None, T: int | None = None, gain: float | None = None, device=None):
     """
     Activa/desactiva codificación temporal en runtime para inputs 4D (B,C,H,W).
     - mode: "rate" | "latency" | "raw" | None
@@ -41,7 +41,7 @@ def _permute_if_needed(x: torch.Tensor) -> torch.Tensor:
     """
     - Si llega 5D como (B,T,C,H,W), permuta a (T,B,C,H,W).
     - Si llega 4D (B,C,H,W) y runtime encode está activo, codifica en el DEVICE indicado
-      por set_runtime_encode(...) y devuelve (T,B,C,H,W) directamente en ese device.
+      por set_encode_runtime(...) y devuelve (T,B,C,H,W) directamente en ese device.
     - Si no aplica, devuelve x tal cual.
     """
     # 5D -> (T,B,C,H,W)

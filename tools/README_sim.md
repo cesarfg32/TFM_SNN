@@ -109,7 +109,7 @@ Argumentos importantes:
 El archivo `tools/sim_drive.py` está organizado en:
 - Carga del modelo + `build_model` (de `src/models.py`).
 - Preprocesado (`ImageTransform` de `src/datasets.py`).
-- Codificación opcional en GPU con `set_runtime_encode()` (de `src/training.py`).
+- Codificación opcional en GPU con `set_encode_runtime()` (de `src/training.py`).
 - *Loop* WebSocket con `websocket-client` y JSON minimalista.
 
 Si quieres registrar vídeo o *dashboards*, añade *hooks* donde se construye el tensor de entrada o al emitir la predicción.

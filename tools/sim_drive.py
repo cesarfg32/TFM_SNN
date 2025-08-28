@@ -36,7 +36,7 @@ def b64_to_bgr(img_b64: str) -> np.ndarray:
     bgr = rgb[..., ::-1].copy()
     return bgr
 
-def make_runtime_encoder(encoder: str, T: int, gain: float):
+def make_encode_runtimer(encoder: str, T: int, gain: float):
     enc = str(encoder).lower()
     if enc not in {"rate", "latency", "raw", "image"}:
         raise ValueError(f"Encoder no soportado: {encoder}")
@@ -140,7 +140,7 @@ def main():
         print(f"[sim] crop_top={args.crop_top} px")
 
     # Encoder temporal runtime (CPU→GPU en inferencia)
-    runtime_encode = make_runtime_encoder(encoder, T, gain)
+    encode_runtime = make_encode_runtimer(encoder, T, gain)
 
     # --- PID para throttle ----------------------------------------------------
     pid = PID(kp=args.kp, ki=args.ki, kd=args.kd, out_min=0.0, out_max=1.0)
@@ -175,7 +175,7 @@ def main():
             bgr = bgr[args.crop_top:, :, :]
         x_img = tfm(bgr).float()  # (C,H,W) en [0,1]
         # 2) Encode temporal
-        xT = runtime_encode(x_img)  # (T,C,H,W) o (1,C,H,W) o (T,H,W)
+        xT = encode_runtime(x_img)  # (T,C,H,W) o (1,C,H,W) o (T,H,W)
         if xT.dim() == 3:  # (T,H,W) -> (T,1,H,W)
             xT = xT.unsqueeze(1)
         # 3) Añadir batch -> (T,1,C,H,W)

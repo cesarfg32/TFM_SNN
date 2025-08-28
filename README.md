@@ -74,9 +74,7 @@ src/
     encode_offline.py     # CSV → H5 (spikes v2)
     augment_offline.py    # balanceo con imágenes aumentadas reales
 tools/
-  prep_udacity.py         # CLI: QC + splits (+ opcional oversampling por bins)
   prep_offline.py         # CLI: pipeline completo prep + balanceo-img + (opcional) H5
-  encode_from_tasks.py    # CLI: tasks*.json → H5 (parámetros explícitos)
   encode_offline.py       # CLI: CSV → H5 (una llamada)
   encode_tasks.py         # CLI: usa presets.yaml para codificar en bloque
   run_continual.py        # CLI: entrenamiento continual con preset
@@ -206,11 +204,6 @@ En `manifest.json` de entrenamiento guardamos:
 - **Pipeline prep completo (incluye balanceo con imágenes y, opcional, H5)**  
   ```bash
   python tools/prep_offline.py --preset fast --config configs/presets.yaml --encode
-  ```
-
-- **Codificar tasks*.json → H5**  
-  ```bash
-  python tools/encode_from_tasks.py --tasks-file data/processed/tasks.json --encoder rate --T 20 --gain 0.5 --w 200 --h 66 --seed 42 --only-missing
   ```
 
 - **Entrenamiento continual con preset**  

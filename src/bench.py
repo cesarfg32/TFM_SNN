@@ -10,7 +10,7 @@ def to_5d(xb, encoder: str, T: int, gain: float, device):
     if xb.ndim == 5:
         return xb.permute(1,0,2,3,4).contiguous(), False
     elif xb.ndim == 4:
-        training.set_runtime_encode(mode=encoder, T=T, gain=gain, device=device)
+        training.set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
         x5d = training._permute_if_needed(xb)  # encode+permute
         return x5d, True
     else:
@@ -51,7 +51,7 @@ def pipeline_its(model, loader, device, iters=100, use_amp=True, encoder=None, T
 
     used_rt = False
     if xb0.ndim == 4:
-        training.set_runtime_encode(mode=encoder, T=T, gain=gain, device=device)
+        training.set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
         used_rt = True
 
     if torch.cuda.is_available():
@@ -78,7 +78,7 @@ def pipeline_its(model, loader, device, iters=100, use_amp=True, encoder=None, T
     its = iters / (time.perf_counter() - t0)
 
     if used_rt:
-        training.set_runtime_encode(None)
+        training.set_encode_runtime(None)
     return its
 
 from pathlib import Path
@@ -105,7 +105,7 @@ def make_loader_fn_factory(
 
     # Flags de codificación (soporta ambos nombres por compatibilidad del propio notebook)
     use_offline_spikes = bool(defaults.pop("USE_OFFLINE_SPIKES", False))
-    runtime_encode     = bool(defaults.pop("RUNTIME_ENCODE", not use_offline_spikes))
+    encode_runtime     = bool(defaults.pop("RUNTIME_ENCODE", not use_offline_spikes))
 
     # Mapea nombre antiguo a nuevo (si lo usan en el notebook)
     if "use_online_balancing" in defaults:
@@ -116,7 +116,7 @@ def make_loader_fn_factory(
     base_mk = build_make_loader_fn(
         root=ROOT,
         use_offline_spikes=use_offline_spikes,
-        runtime_encode=runtime_encode,
+        encode_runtime=encode_runtime,
     )
 
     def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **overrides):
@@ -139,7 +139,7 @@ def universal_smoke_forward(
     tfm,
     seed: int,
     device: torch.device,
-    use_runtime_encode: bool,
+    use_encode_runtime: bool,
 ) -> tuple[torch.Size, torch.Size]:
     """Devuelve (x5d_shape, yhat_shape). Imprime qué camino se ha tomado."""
     tr, _, _ = make_loader_fn(
@@ -152,9 +152,9 @@ def universal_smoke_forward(
         x5d = xb.permute(1, 0, 2, 3, 4).contiguous()
         print("dataset ya codificado; solo permuto a (T,B,C,H,W)")
     elif xb.ndim == 4:
-        if not use_runtime_encode:
-            raise RuntimeError("El loader entrega 4D pero use_runtime_encode=False. Actívalo o usa encoder temporal en el dataset.")
-        training.set_runtime_encode(mode=encoder, T=T, gain=gain, device=device)
+        if not use_encode_runtime:
+            raise RuntimeError("El loader entrega 4D pero use_encode_runtime=False. Actívalo o usa encoder temporal en el dataset.")
+        training.set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
         x5d = training._permute_if_needed(xb)  # encode + permute
         used_runtime = True
         print("dataset 4D; uso encode en GPU y permuto a (T,B,C,H,W)")
@@ -175,7 +175,7 @@ def universal_smoke_forward(
         print("[forward] ejecutado con AMP" if torch.cuda.is_available() else "[forward] ejecutado en FP32")
     finally:
         if used_runtime:
-            training.set_runtime_encode(None)
+            training.set_encode_runtime(None)
 
     return x5d.shape, y.shape
 

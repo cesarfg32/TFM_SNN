@@ -17,12 +17,12 @@ def main():
     ap = argparse.ArgumentParser(description="Prep offline: splits → balanceo con imágenes → tasks_balanced.json → (opcional) H5.")
     ap.add_argument("--preset", required=True, choices=["fast","std","accurate"])
     ap.add_argument("--config", default=str(ROOT / "configs" / "presets.yaml"))
-    ap.add_argument("--encode", action="store_true", help="Si se indica, fuerza encode H5 aunque encode_offline.enabled sea False.")
+    ap.add_argument("--encode", action="store_true", help="Si se indica, fuerza encode H5 aunque prep_offline.enabled sea False.")
     args = ap.parse_args()
 
     cfg = load_preset(Path(args.config), args.preset)
     prep = cfg.get("prep", {})
-    enc  = cfg.get("encode_offline", {})
+    enc  = cfg.get("prep_offline", {})
     data = cfg.get("data", {})
     model= cfg.get("model", {})
 
