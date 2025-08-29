@@ -25,6 +25,7 @@ defaults: &defaults
 
   prep: &defaults_prep
     runs: []
+    merge_subruns: true
     use_left_right: true
     steer_shift: 0.2
     bins: 50

@@ -90,13 +90,75 @@ def load_raw_log(base: Path) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     # Filtra filas sin imagen (al menos center; y si quieres, también left/right)
-    df = df[(base / df["center"]).apply(lambda p: p.exists())]
+    df = df[df["center"].map(lambda s: (base / s).exists())]
     # Si quieres filtrar también left/right, descomenta:
     # for cam in ["left","right"]:
     #     df = df[(base / df[cam]).apply(lambda p: p.exists())]
 
     df = df.dropna(subset=["steering"]).reset_index(drop=True)
     return df
+
+def _rel_to_run_from_log(s: str, log_dir: Path, run_root: Path) -> str:
+    """Normaliza s y la convierte a ruta RELATIVA a run_root (p.ej. 'vuelta1/IMG/...').
+    - Si s contiene 'IMG/', tomamos desde ahí (ignora prefijos absolutos tipo C:/...).
+    - Si no, resolvemos relativo a la carpeta del driving_log (log_dir) y luego a run_root.
+    """
+    if pd.isna(s):
+        return s
+    s = _fix_path(s)
+
+    # Preferencia: cortar desde 'IMG/' si aparece
+    low = s.lower()
+    k = low.rfind("img/")
+    if k != -1:
+        abs_p = (log_dir / s[k:]).resolve()
+    else:
+        p = Path(s)
+        abs_p = p if p.is_absolute() else (log_dir / p)
+        abs_p = abs_p.resolve()
+
+    # Intentar relativo a run_root
+    try:
+        rel = abs_p.relative_to(run_root.resolve())
+        return rel.as_posix()
+    except Exception:
+        # Último recurso: recortar desde 'IMG/' en la ruta ya resuelta
+        low2 = str(abs_p).lower()
+        k2 = low2.rfind("img/")
+        if k2 != -1:
+            return str(abs_p)[k2:].replace("\\", "/")
+        # Fallback final: nombre de archivo
+        return abs_p.name
+
+
+def load_raw_logs_merged(run_root: Path) -> pd.DataFrame:
+    """Fusiona TODOS los driving_log.csv bajo run_root (recursivo), ignorando 'aug/'.
+    Reescribe center/left/right a rutas RELATIVAS a run_root: 'vueltaX/IMG/...'
+    Filtra filas cuya imagen CENTER no exista.
+    """
+    logs = [p for p in run_root.rglob("driving_log.csv") if "aug" not in p.parts]
+    if not logs:
+        raise FileNotFoundError(f"No se encontraron driving_log.csv bajo {run_root}")
+    dfs = []
+    for lp in sorted(logs):
+        df = pd.read_csv(lp, header=None, names=CSV_COLS)
+        # normaliza y relativiza respecto al run_root, resolviendo contra lp.parent
+        for cam in ["center", "left", "right"]:
+            if cam in df.columns:
+                df[cam] = df[cam].map(lambda s: _rel_to_run_from_log(s, lp.parent, run_root))
+        # numéricos + filtrado
+        for c in ["steering", "throttle", "brake", "speed"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df[df["center"].map(lambda s: (run_root / s).exists())]
+        df = df.dropna(subset=["steering"]).reset_index(drop=True)
+        dfs.append(df)
+    if not dfs:
+        raise RuntimeError(f"No se generó ningún DF válido para {run_root}")
+    dfs = [d for d in dfs if not d.empty]
+    if not dfs:
+        raise RuntimeError(f"Todas las filas fueron filtradas por inexistentes en {run_root}. "
+                        f"¿Rutas del CSV no casan con el árbol de imágenes?")
+    return pd.concat(dfs, ignore_index=True)
 
 
 # ----------------------- Expansión de cámaras -------------------------
@@ -254,7 +316,6 @@ def _write_tasks_json(proc_root: Path, runs: list[str], balanced: bool):
 
 
 # ------------------------------- Main ---------------------------------
-
 @dataclass
 class PrepConfig:
     root: Path
@@ -267,6 +328,7 @@ class PrepConfig:
     seed: int
     target_per_bin: Optional[Union[str, int]] = None
     cap_per_bin: Optional[int] = None
+    merge_subruns: bool = False 
 
 def run_prep(cfg: PrepConfig) -> dict:
     RAW  = cfg.root / "data" / "raw" / "udacity"
@@ -282,7 +344,7 @@ def run_prep(cfg: PrepConfig) -> dict:
         out_dir = PROC / run
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        df = load_raw_log(base)
+        df = load_raw_logs_merged(base) if cfg.merge_subruns else load_raw_log(base)
         df.to_csv(out_dir / "canonical.csv", index=False)
 
         if cfg.use_left_right:
