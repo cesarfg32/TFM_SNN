@@ -133,6 +133,13 @@ class EWCMethod:
         # no-op
         pass
 
-    def after_task(self, model: nn.Module, train_loader, val_loader) -> None:
-        # Igual que hacías: estimar Fisher tras entrenar la tarea
-        self.impl.estimate_fisher(val_loader, self.loss_fn, device=self.device)
+    def after_task(self, model, train_loader, val_loader) -> None:
+        # Preferimos val si aporta al menos fisher_batches; si no, usamos train
+        fisher_batches = getattr(self.impl.cfg, "fisher_batches", 100)
+        try:
+            chosen = val_loader if len(val_loader) >= fisher_batches else train_loader
+        except TypeError:
+            # Si el val_loader no tiene len(), usamos train
+            chosen = train_loader
+
+        self.impl.estimate_fisher(chosen, self.loss_fn, device=self.device)

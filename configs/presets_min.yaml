@@ -1,0 +1,70 @@
+defaults: &defaults
+  model: &defaults_model
+    name: pilotnet_snn
+    img_w: 200
+    img_h: 66
+    to_gray: true
+
+  data: &defaults_data
+    use_offline_spikes: true      # H5
+    encode_runtime: false         # codificación en GPU si use_offline_spikes=false
+    seed: 42
+    num_workers: 8
+    prefetch_factor: 2
+    pin_memory: true
+    persistent_workers: true
+
+    encoder: rate                 # rate | latency | raw | image
+    T: 10
+    gain: 0.5
+
+    balance_online: false
+    balance_bins: 50            # null ⇒ hereda de prep.bins cuando balance_online=true
+    balance_smooth_eps: 0.001
+    aug_train: null
+
+  prep: &defaults_prep
+    runs: []
+    merge_subruns: true
+    use_left_right: true
+    steer_shift: 0.2
+    bins: 50
+    train: 0.70
+    val: 0.15
+    seed: 42
+    balance_offline:
+      mode: images                # images | none
+      target_per_bin: auto
+      cap_per_bin: 12000
+      aug:
+        prob_hflip: 0.5
+        brightness: [0.8, 1.2]
+        contrast:   [0.8, 1.2]
+        saturation: [0.8, 1.2]
+        hue:        [-0.1, 0.1]
+        gamma: null
+        noise_std: 0.0
+    tasks_file_name: tasks.json
+    tasks_balanced_file_name: tasks_balanced.json
+
+  prep_offline: &defaults_encode
+    enabled: true                 # se puede ignorar y usar --encode en CLI
+    use_balanced_tasks: true
+
+  optim: &defaults_optim
+    amp: true
+    lr: 0.001
+    epochs: 2
+    es_patience: null
+    es_min_delta: null
+    batch_size: 64
+
+  continual: &defaults_continual
+    method: naive
+    params: {}
+
+  naming: &defaults_naming
+    tag: ""
+
+fast:
+  <<: *defaults

@@ -1,3 +1,8 @@
+# =====================
+# PRESETS TFM — SNN/CL
+# =====================
+
+# ---- Bloque base (anclas) ----
 defaults: &defaults
   model: &defaults_model
     name: pilotnet_snn
@@ -6,25 +11,38 @@ defaults: &defaults
     to_gray: true
 
   data: &defaults_data
-    use_offline_spikes: true      # H5
-    encode_runtime: false         # codificación en GPU si use_offline_spikes=false
+    # Codificación
+    encoder: rate              # rate | latency | raw | image
+    T: 10
+    gain: 0.5
+    use_offline_spikes: true   # H5 offline
+    encode_runtime: false      # solo si use_offline_spikes=false
+
+    # Reproductibilidad / rendimiento
     seed: 42
     num_workers: 8
     prefetch_factor: 2
     pin_memory: true
     persistent_workers: true
 
-    encoder: rate                 # rate | latency | raw | image
-    T: 10
-    gain: 0.5
+    # Aumentos (ligeros por defecto)
+    aug_train: &aug_light
+      prob_hflip: 0.5
+      brightness: [0.9, 1.1]
+      contrast:   [0.9, 1.1]
+      saturation: [0.9, 1.1]
+      hue:        [-0.03, 0.03]
+      gamma: null
+      noise_std: 0.0
 
+    # Balanceo online (desactivado por defecto)
     balance_online: false
-    balance_bins: 50            # null ⇒ hereda de prep.bins cuando balance_online=true
+    balance_bins: 50
     balance_smooth_eps: 0.001
-    aug_train: null
 
+  # División/prepare (offline)
   prep: &defaults_prep
-    runs: []
+    runs: ["circuito1", "circuito2"]  # o [] si autodetectas
     merge_subruns: true
     use_left_right: true
     steer_shift: 0.2
@@ -32,12 +50,13 @@ defaults: &defaults
     train: 0.70
     val: 0.15
     seed: 42
+    # Balanceo offline de imágenes (si tu pipeline lo usa)
     balance_offline:
-      mode: images                # images | none
+      mode: images            # images | none
       target_per_bin: auto
       cap_per_bin: 12000
       aug:
-        prob_hflip: 0.5
+        prob_hflip: 0.0       # ← desactivar en offline, solo aumentos fotométricos
         brightness: [0.8, 1.2]
         contrast:   [0.8, 1.2]
         saturation: [0.8, 1.2]
@@ -47,22 +66,80 @@ defaults: &defaults
     tasks_file_name: tasks.json
     tasks_balanced_file_name: tasks_balanced.json
 
-  prep_offline: &defaults_encode
-    enabled: true                 # se puede ignorar y usar --encode en CLI
-    use_balanced_tasks: true
-
   optim: &defaults_optim
     amp: true
     lr: 0.001
     epochs: 2
+    es_patience: null
+    es_min_delta: null
     batch_size: 64
 
+  # >>> EWC por defecto en TODOS los presets (salvo que se sobrescriba) <<<
   continual: &defaults_continual
-    method: naive
-    params: {}
+    method: ewc
+    params:
+      lam: 1.0e9
+      fisher_batches: 1000
 
   naming: &defaults_naming
     tag: ""
 
+
+# ---- Presets ----
+
 fast:
   <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 10
+  optim:
+    <<: *defaults_optim
+    epochs: 2
+    batch_size: 64
+  continual:
+    <<: *defaults_continual
+    # EWC heredado (lam/fisher ya arriba)
+  prep:
+    <<: *defaults_prep
+    # p.ej. bins: 40   # (opcional, si quisieras menos bins)
+
+std:
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 16
+  optim:
+    <<: *defaults_optim
+    lr: 5.0e-4
+    epochs: 8
+    batch_size: 56
+    es_patience: 3
+    es_min_delta: 1.0e-4
+  continual:
+    <<: *defaults_continual
+    params:
+      lam: 1.0e9
+      fisher_batches: 1200
+  prep:
+    <<: *defaults_prep
+
+accurate:
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 30
+  optim:
+    <<: *defaults_optim
+    lr: 7.5e-4
+    epochs: 20
+    batch_size: 16
+  continual:
+    # Si quieres EWC también aquí, cambia la línea de method a "ewc" y borra params de replay
+    method: rehearsal+ewc
+    params:
+      buffer_size: 5000
+      replay_ratio: 0.2
+      lam: 1.0e9
+      fisher_batches: 1500
+  prep:
+    <<: *defaults_prep
