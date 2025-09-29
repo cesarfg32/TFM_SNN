@@ -143,3 +143,45 @@ accurate:
       fisher_batches: 1500
   prep:
     <<: *defaults_prep
+
+
+# Variante gris, T=10, gain=0.5, encoder=rate
+rate_t10_gray:
+  <<: *defaults
+  model:
+    <<: *defaults_model
+    to_gray: true
+  data:
+    <<: *defaults_data
+    encoder: rate
+    T: 10
+    gain: 0.5
+  naming:
+    <<: *defaults_naming
+    tag: rate_t10_gray
+
+# Variante color (to_gray=false), T=16, encoder=rate
+rate_t16_rgb:
+  <<: *defaults
+  model:
+    <<: *defaults_model
+    to_gray: false
+  data:
+    <<: *defaults_data
+    encoder: rate
+    T: 16
+    gain: 0.5
+  naming:
+    <<: *defaults_naming
+    tag: rate_t16_rgb
+
+# Variante latency, T=16, gris
+latency_t16_gray:
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    encoder: latency
+    T: 16
+  naming:
+    <<: *defaults_naming
+    tag: latency_t16_gray

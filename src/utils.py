@@ -368,4 +368,72 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
 
     return make_loader_fn
 
+# ---------------------------------------------------------------------
+# Helpers comunes para notebooks/tools: task_list y factories coherentes con un preset
+# ---------------------------------------------------------------------
+from pathlib import Path
+import json
+
+def build_task_list_for(cfg: dict, root: Path):
+    """
+    Devuelve (task_list, tasks_file_path) respetando 'prep_offline.use_balanced_tasks'.
+    task_list = [{"name": run, "paths": {"train":..., "val":..., "test":...}}, ...]
+    """
+    proc = root / "data" / "processed"
+    use_bal = bool(cfg.get("prep_offline", {}).get("use_balanced_tasks", False))
+    tb_name = (cfg.get("prep", {}).get("tasks_balanced_file_name") or "tasks_balanced.json")
+    t_name  = (cfg.get("prep", {}).get("tasks_file_name") or "tasks.json")
+
+    tasks_file = (proc / tb_name) if (use_bal and (proc / tb_name).exists()) else (proc / t_name)
+    tasks_json = json.loads(tasks_file.read_text(encoding="utf-8"))
+    task_list = [{"name": n, "paths": tasks_json["splits"][n]} for n in tasks_json["tasks_order"]]
+    return task_list, tasks_file
+
+
+def build_components_for(cfg: dict, root: Path):
+    """
+    Construye:
+      - tfm: ImageTransform coherente con el preset
+      - make_loader_fn: elige H5 offline o CSV + runtime encode (usa build_make_loader_fn de este módulo)
+      - make_model_fn: factory de modelo (import diferido p/evitar ciclos)
+    """
+    # import diferido para evitar ciclos con src.models
+    from src.models import build_model
+
+    # --- Transform ---
+    tfm = ImageTransform(
+        int(cfg["model"]["img_w"]),
+        int(cfg["model"]["img_h"]),
+        to_gray=bool(cfg["model"]["to_gray"]),
+        crop_top=None
+    )
+
+    # --- Loader factory base (reutiliza la función ya definida en este archivo) ---
+    use_offline = bool(cfg["data"].get("use_offline_spikes", False))
+    runtime_enc = bool(cfg["data"].get("encode_runtime", False))
+    _raw_mk = build_make_loader_fn(root=root, use_offline_spikes=use_offline, encode_runtime=runtime_enc)
+
+    # --- Kwargs coherentes con cfg ---
+    aug_cfg = AugmentConfig(**(cfg["data"].get("aug_train") or {})) if cfg["data"].get("aug_train") else None
+    _DL_KW = dict(
+        num_workers=int(cfg["data"].get("num_workers") or 0),
+        prefetch_factor=int(cfg["data"].get("prefetch_factor") or 2),
+        pin_memory=bool(cfg["data"].get("pin_memory", True)),
+        persistent_workers=bool(cfg["data"].get("persistent_workers", True)),
+        aug_train=aug_cfg,
+        balance_train=bool(cfg["data"].get("balance_online", False)),
+        balance_bins=int(cfg["data"].get("balance_bins") or 50),
+        balance_smooth_eps=float(cfg["data"].get("balance_smooth_eps") or 1e-3),
+    )
+
+    def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
+        return _raw_mk(
+            task=task, batch_size=batch_size, encoder=encoder, T=T, gain=gain,
+            tfm=tfm, seed=seed, **{**_DL_KW, **(dl_kwargs or {})}
+        )
+
+    def make_model_fn(tfm_):
+        return build_model(cfg["model"]["name"], tfm_, beta=0.9, threshold=0.5)
+
+    return tfm, make_loader_fn, make_model_fn
 

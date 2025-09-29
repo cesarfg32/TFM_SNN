@@ -80,37 +80,73 @@ def _encode_raw(img01: np.ndarray, T: int) -> np.ndarray:
         return np.repeat(frame[None, :, :, :], T, axis=0)  # T,C,H,W
 
 def _encode_latency(img01: np.ndarray, T: int, rng: np.random.Generator) -> np.ndarray:
-    """Ejemplo simple de latency: cuanto más brillante el pixel antes dispara.
-    Aquí usamos una heurística reproducible. Devuelve float32:
-      - gris  ⇒ (T,H,W), con valores {0..T-1} en un canal one-hot temporal (máxima 1 por pixel) o -1 si nada
-      - RGB   ⇒ (T,C,H,W) con misma convención.
-    Implementación: probamos que el pixel dispare con prob = I, y si dispara le asignamos una latencia
-    t ~ Geom(p) truncada en [0, T-1]. Si no dispara => todo -1 (o un -1 en el canal temporal).
     """
-    def latency_map(ch01: np.ndarray) -> np.ndarray:
-        H, W = ch01.shape
-        spikes = np.full((T, H, W), -1.0, dtype=np.float32)  # -1 = sin evento
-        p = ch01  # [0,1]
-        fire = rng.random((H, W), dtype=np.float32) < p
-        # latencia geométrica truncada
-        # t = min(geom(p) - 1, T-1); aproximamos geom con -log(u)/log(1-p)
-        u = rng.random((H, W), dtype=np.float32)
-        denom = np.log(np.clip(1.0 - p, 1e-6, 1.0))
-        t = np.minimum((-(np.log(u) / denom)).astype(np.int32), T - 1)
-        # set latencia donde fire
-        for yy, xx in zip(*np.where(fire)):
-            spikes[t[yy, xx], yy, xx] = float(t[yy, xx])
-        return spikes
+    Latency coding robusta para SNN.
 
-    if img01.ndim == 2:
-        return latency_map(img01)
+    Idea original (conservada y comentada):
+      - Cuanto más brillante el píxel, antes dispara (latencia menor).
+      - Usamos una heurística reproducible: con prob. p = I (intensidad en [0,1])
+        el píxel dispara; si dispara, su latencia es t = floor((1 - I)*(T-1)).
+      - Si no dispara, no hay evento (todo el vector temporal a 0.0).
+
+    Diferencias respecto a la versión anterior (arreglos):
+      - Clamp de intensidades y de índices: t ∈ [0, T-1] ⇒ sin índices negativos.
+      - Se escribe 1.0 en el instante t (one-hot temporal), no el valor de t.
+      - Soporta entradas (H,W), (C,H,W) o (H,W,C) y devuelve (T,H,W) o (T,C,H,W).
+
+    Parámetros:
+      img01 : np.ndarray float32 normalizada a [0,1]
+      T     : tamaño temporal
+      rng   : np.random.Generator para reproducibilidad
+
+    Devuelve:
+      np.ndarray con spikes 0/1:
+        - (T,H,W)  si entrada era (H,W)
+        - (T,C,H,W) si entrada tenía canales
+    """
+    # --- Normalización de forma y dominio ---
+    arr = np.asarray(img01, dtype=np.float32)
+    np.clip(arr, 0.0, 1.0, out=arr)
+
+    if arr.ndim == 2:                 # (H,W)
+        C, H, W = 1, arr.shape[0], arr.shape[1]
+        arr_c = arr[None, ...]        # -> (1,H,W)
+    elif arr.ndim == 3:
+        # Acepta (C,H,W) o (H,W,C)
+        if arr.shape[0] in (1, 3):    # asumimos (C,H,W)
+            C, H, W = arr.shape
+            arr_c = arr
+        else:                         # (H,W,C) -> (C,H,W)
+            H, W, C = arr.shape
+            arr_c = np.transpose(arr, (2, 0, 1)).copy()
     else:
-        H, W, C = img01.shape
-        outs = []
-        for c in range(C):
-            outs.append(latency_map(img01[..., c]))
-        # (T,H,W) x C -> (T,C,H,W)
-        return np.stack(outs, axis=1)
+        raise ValueError(f"Forma inesperada: {arr.shape}")
+
+    # --- Reserva salida (T,C,H,W) ---
+    spikes = np.zeros((T, C, H, W), dtype=np.float32)
+
+    # --- Máscara de disparo (prob. p = I) ---
+    u_fire = rng.random((C, H, W), dtype=np.float32)
+    fire = (u_fire < arr_c)
+
+    # --- Latencias: t = floor((1 - I)*(T-1)), clamp a [0, T-1] ---
+    t_float = (1.0 - arr_c) * (T - 1)
+    t_idx = np.floor(t_float).astype(np.int64)
+    np.clip(t_idx, 0, T - 1, out=t_idx)
+
+    # --- Escribir spikes one-hot temporal ---
+    for c in range(C):
+        yy, xx = np.where(fire[c])
+        if yy.size:
+            tt = t_idx[c, yy, xx]
+            spikes[tt, c, yy, xx] = 1.0
+
+    # --- Salida con/sin canal ---
+    if img01.ndim == 2:
+        return spikes[:, 0, :, :]  # (T,H,W)
+    else:
+        return spikes              # (T,C,H,W)
+
 
 def encode_csv_to_h5(
     csv_df_or_path: pd.DataFrame | Path | str,
@@ -170,7 +206,7 @@ def encode_csv_to_h5(
         spikes_dtype = np.float32
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with h5py.File(out_path, "w") as h5:
+    with h5py.File(out_path, "w", locking=False) as h5:
         # Atributos
         h5.attrs["version"] = 2
         h5.attrs["encoder"] = encoder
