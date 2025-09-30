@@ -15,8 +15,9 @@ Retrocompatibilidad:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 import random
+import json
 import yaml
 import numpy as np
 import torch
@@ -317,7 +318,6 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
 
     def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
         run = task["name"]
-        base_proc = proc_root / run
         base_raw  = raw_root / run
 
         # Normaliza kwargs del DataLoader (única fuente de verdad)
@@ -345,7 +345,6 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
 
         # --- CSV (imágenes) con/ sin runtime encode ---
         paths    = task["paths"]
-        base_raw = raw_root / run
 
         tr_csv = _abs(paths["train"])
         va_csv = _abs(paths["val"])
@@ -371,20 +370,23 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
 # ---------------------------------------------------------------------
 # Helpers comunes para notebooks/tools: task_list y factories coherentes con un preset
 # ---------------------------------------------------------------------
-from pathlib import Path
-import json
 
 def build_task_list_for(cfg: dict, root: Path):
     """
-    Devuelve (task_list, tasks_file_path) respetando 'prep_offline.use_balanced_tasks'.
+    Devuelve (task_list, tasks_file_path) respetando 'prep.use_balanced_tasks'.
     task_list = [{"name": run, "paths": {"train":..., "val":..., "test":...}}, ...]
     """
     proc = root / "data" / "processed"
-    use_bal = bool(cfg.get("prep_offline", {}).get("use_balanced_tasks", False))
+    use_bal = bool(cfg.get("prep", {}).get("use_balanced_tasks", False))
     tb_name = (cfg.get("prep", {}).get("tasks_balanced_file_name") or "tasks_balanced.json")
     t_name  = (cfg.get("prep", {}).get("tasks_file_name") or "tasks.json")
 
     tasks_file = (proc / tb_name) if (use_bal and (proc / tb_name).exists()) else (proc / t_name)
+    if not tasks_file.exists():
+        raise FileNotFoundError(
+            f"No existe {tasks_file.name} en {proc}. Genera los splits con tu pipeline "
+            f"(p.ej. tools/prep_offline.py) antes de entrenar."
+        )
     tasks_json = json.loads(tasks_file.read_text(encoding="utf-8"))
     task_list = [{"name": n, "paths": tasks_json["splits"][n]} for n in tasks_json["tasks_order"]]
     return task_list, tasks_file

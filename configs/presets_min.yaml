@@ -46,10 +46,9 @@ defaults: &defaults
         noise_std: 0.0
     tasks_file_name: tasks.json
     tasks_balanced_file_name: tasks_balanced.json
-
-  prep_offline: &defaults_encode
-    enabled: true                 # se puede ignorar y usar --encode en CLI
     use_balanced_tasks: true
+    encode_h5: false   # (opcional). Se puede setear true en algún preset.
+
 
   optim: &defaults_optim
     amp: true

@@ -65,6 +65,8 @@ defaults: &defaults
         noise_std: 0.0
     tasks_file_name: tasks.json
     tasks_balanced_file_name: tasks_balanced.json
+    use_balanced_tasks: true
+    encode_h5: false   # (opcional). Se puede setear true en algún preset.
 
   optim: &defaults_optim
     amp: true
@@ -137,12 +139,36 @@ accurate:
     # Si quieres EWC también aquí, cambia la línea de method a "ewc" y borra params de replay
     method: rehearsal+ewc
     params:
-      buffer_size: 5000
+      buffer_size: 3000
       replay_ratio: 0.2
       lam: 1.0e9
       fisher_batches: 1500
   prep:
     <<: *defaults_prep
+
+as_snn:
+  <<: *defaults
+  continual:
+    method: as-snn
+    params:
+      lambda_a: 2.5
+      gamma_ratio: 0.5
+      ema: 0.9
+  naming:
+    <<: *defaults_naming
+    tag: as_snn
+
+as_snn_tuned:
+  <<: *defaults
+  continual:
+    method: as-snn
+    params:
+      gamma_ratio: 0.3       # ← mejor de Optuna
+      lambda_a: 1.59168      # ← mejor de Optuna (redondea si quieres: 1.59)
+      ema: 0.824             # ← mejor de Optuna (0.823983…)
+  naming:
+    <<: *defaults_naming
+    tag: as_snn_tuned
 
 
 # Variante gris, T=10, gain=0.5, encoder=rate

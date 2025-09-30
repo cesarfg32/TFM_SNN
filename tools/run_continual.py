@@ -18,11 +18,40 @@ def main():
     ap.add_argument("--tasks-file", type=Path, default=None,
                     help="Override: ruta a tasks.json / tasks_balanced.json")
     ap.add_argument("--tag", default="", help="Etiqueta extra para el nombre de salida")
+    ap.add_argument("--method", default=None,
+                    help="Override: nombre del método continual (p.ej. 'as-snn', 'ewc', 'rehearsal+ewc').")
+    ap.add_argument("--params", default="",
+                    help="Override: key=val[,key=val...] para method params. Ej: 'gamma_ratio=0.3,lambda_a=1.6,ema=0.82'")
     args = ap.parse_args()
 
     cfg = load_preset(args.config, args.preset)
     if args.tag:
         cfg.setdefault("naming", {})["tag"] = args.tag
+    # Overrides de método/params
+    if args.method:
+        cfg.setdefault("continual", {})["method"] = args.method
+    if args.params:
+        # parseo simple key=val[,key=val...], convierte a float/int si procede
+        out = {}
+        for kv in args.params.split(","):
+            if not kv.strip():
+                continue
+            k, v = kv.split("=", 1)
+            v = v.strip()
+            # castear números
+            try:
+                if "." in v or "e" in v.lower():
+                    v_cast = float(v)
+                else:
+                    v_cast = int(v)
+            except ValueError:
+                # bools simples
+                if v.lower() in ("true","false"):
+                    v_cast = (v.lower() == "true")
+                else:
+                    v_cast = v
+            out[k.strip()] = v_cast
+        cfg.setdefault("continual", {})["params"] = out
 
     # Componentes coherentes con el preset
     tfm, make_loader_fn, make_model_fn = build_components_for(cfg, ROOT)
