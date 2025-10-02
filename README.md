@@ -3,7 +3,8 @@
 Proyecto para investigar **aprendizaje continuo** (Continual Learning, **CL**) en **redes de impulsos** (Spiking Neural Networks, **SNN**) aplicado a **regresión del ángulo de dirección (*steering*)** en el simulador de Udacity.  
 Stack: **PyTorch + snnTorch**, ejecución local en **Linux/WSL2 + CUDA** o CPU.
 
-> **Datos**: guía y estructura en [`data/README.md`](data/README.md).  
+> **Datos**: organización y flujo en [`data/README.md`](data/README.md)
+> **Notebooks**: cómo preparar datos, validar pipeline y entrenar → [`notebooks/README.md`](notebooks/README.md)
 > **Simulador (inferencia en tiempo real)**: ver [`tools/README_sim.md`](tools/README_sim.md).
 
 ---

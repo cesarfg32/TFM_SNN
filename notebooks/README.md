@@ -141,6 +141,3 @@ data/
 - **Presets como fuente de verdad**: define en `configs/presets.yaml` el modelo base, codificación temporal, *augment*, *loader* y método continual.
 - **Semillas**: el preset fija `data.seed`; los cuadernos propagan ese valor para splits, codificación y entrenamiento.
 - **Nomenclatura coherente**: H5, carpetas de `outputs/` y figuras siguen *naming* estable con `encoder/T/gain/color/size` y el `preset_name`.
-
-¿Algo que mejorar en esta guía? Abre un *issue* indicando el `PRESET` y la celda que falló.
-
