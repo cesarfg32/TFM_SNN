@@ -136,7 +136,6 @@ accurate:
     epochs: 20
     batch_size: 16
   continual:
-    # Si quieres EWC también aquí, cambia la línea de method a "ewc" y borra params de replay
     method: rehearsal+ewc
     params:
       buffer_size: 3000

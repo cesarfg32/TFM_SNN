@@ -1,6 +1,6 @@
-# TFM — SNN + Aprendizaje Continuo en SNN (steering Udacity)
+# TFM — Aprendizaje Continuo con SNN para *steering* en conducción simulada (Udacity)
 
-Proyecto para investigar **aprendizaje continuo (Continual Learning, CL)** en **redes de impulsos (Spiking Neural Networks, SNN)** aplicadas a **regresión de ángulo de dirección (steering)** en conducción simulada (Udacity).
+Proyecto para investigar **aprendizaje continuo** (Continual Learning, **CL**) en **redes de impulsos** (Spiking Neural Networks, **SNN**) aplicado a **regresión del ángulo de dirección (*steering*)** en el simulador de Udacity.  
 Stack: **PyTorch + snnTorch**, ejecución local en **Linux/WSL2 + CUDA** o CPU.
 
 > **Datos**: guía y estructura en [`data/README.md`](data/README.md).  
@@ -12,12 +12,12 @@ Stack: **PyTorch + snnTorch**, ejecución local en **Linux/WSL2 + CUDA** o CPU.
 
 - **Python 3.12** (recomendado) y `pip`.
 - Linux o **WSL2 (Ubuntu 24.04)** en Windows 11.
-- GPU NVIDIA opcional (recomendado). Instala la *wheel* de PyTorch para tu versión CUDA.
-- No requiere compilación (todo Python).
+- GPU NVIDIA opcional (recomendado). Instala la *wheel* de PyTorch acorde a tu versión de CUDA.
+- No se requiere compilación (todo en Python).
 
-> En WSL2, asegúrate de:
-> - Driver NVIDIA actualizado en Windows.
-> - Soporte CUDA visible dentro de WSL (`nvidia-smi`).
+> En WSL2:
+> - Asegúrate de tener el **driver NVIDIA** actualizado en Windows.
+> - Verifica CUDA dentro de WSL2 con `nvidia-smi`.
 
 ---
 
@@ -49,69 +49,123 @@ python tools/check_env.py
 
 ```
 configs/
-  presets.yaml            # perfiles (fast / std / accurate)
+  presets.yaml            # perfiles declarativos (fast / std / accurate)
+
 data/
   raw/udacity/...         # datos originales (ver data/README.md)
   processed/...           # splits, balanceados y H5 generados
+
 notebooks/
-  01_DATA_QC_PREP.ipynb   # QC + normalización rutas + splits (train/val/test) + tasks.json
-  01A_PREP_BALANCED.ipynb # (opcional) balanceo por bins offline + verificación
-  02_ENCODE_OFFLINE.ipynb # (opcional) codificación a spikes offline (HDF5, formato v2)
-  03_TRAIN_CONTINUAL.ipynb# entrenamiento continual (EWC, rehearsal, etc.) + ES opcional
-  03B_HPO_OPTUNA.ipynb    # HPO básico con Optuna sobre continual
+  01_DATA_QC_PREP.ipynb   # QC + normalización + splits (train/val/test) + tasks.json
+  01A_PREP_BALANCED.ipynb # (autónomo) SPLITS + (opcional) balanceo por imágenes + EDA
+  02_ENCODE_OFFLINE.ipynb # (opcional) codificación a spikes offline (HDF5)
+  03_TRAIN_CONTINUAL.ipynb# entrenamiento continual (métodos CL) + métricas/olvido
+  03B_HPO_OPTUNA.ipynb    # HPO con Optuna (objetivo compuesto)
   04_RESULTS.ipynb        # agregación de resultados y figuras
+  99_SIM_INTEGRATION.ipynb# integración con el simulador (ciclo cerrado, codificación online)
+
 outputs/
-  ...                     # métricas y manifiestos por experimento
+  ...                     # manifiestos y métricas por experimento
+
 src/
   datasets.py             # Udacity CSV/H5 + augment + balanceo online
-  models.py               # SNNVision / PilotNet ANN+SNN (dinámicos)
-  training.py             # bucles de entrenamiento + early stopping + AMP
-  runner.py               # orquestador continual (tareas, eval secuencial)
-  utils.py                # seeds, presets, dataloaders factory
-  bench.py                # utilidades de benchmarking
+  models.py               # backbones ANN/SNN
+  runner.py               # orquestador continual (secuencia de tareas)
+  utils.py                # seeds, presets, factories
+
+  methods/                # métodos de Aprendizaje Continuo (CL)
+    __init__.py
+    api.py                # interfaz común (Strategy)
+    registry.py           # registro por nombre (Factory)
+    composite.py          # composición de métodos compatibles (Composite)
+    naive.py              # finetune secuencial (baseline)
+    ewc.py                # Elastic Weight Consolidation
+    rehearsal.py          # memoria de repetición (buffer)
+    as_snn.py             # Adaptive Synaptic Scaling
+    sa_snn.py             # Sparse Selective Activation
+    sca_snn.py            # Similarity-based Context-Aware
+    colanet.py            # Columnar SNN
+
   prep/
-    data_prep.py          # limpieza, splits, balanceo offline (duplicación)
-    encode_offline.py     # CSV → H5 (spikes v2)
-    augment_offline.py    # balanceo con imágenes aumentadas reales
+    data_prep.py          # QC + normalización + splits (fusión de subvueltas)
+    augment_offline.py    # balanceo por imágenes (genera imágenes reales por bins)
+    encode_offline.py     # CSV → H5 (spikes)
+
 tools/
-  prep_offline.py         # CLI: pipeline completo prep + balanceo-img + (opcional) H5
-  encode_offline.py       # CLI: CSV → H5 (una llamada)
-  encode_tasks.py         # CLI: usa presets.yaml para codificar en bloque
-  run_continual.py        # CLI: entrenamiento continual con preset
-  sim_drive.py            # Cliente WebSocket para el simulador Udacity (inferencia)
-  README_sim.md           # Guía de integración del simulador
+  prep_offline.py         # CLI: SPLITS + (opcional) balanceo-img + (opcional) H5
+  encode_offline.py       # CLI: CSV → H5 para un preset
+  encode_tasks.py         # CLI: encode en bloque según presets
+  run_continual.py        # CLI: entrenamiento continual por preset
+  sim_drive.py            # Cliente del simulador (inferencia)
+  README_sim.md           # Guía de integración con el simulador
 ```
 
 ---
 
 ## 4) Flujo de trabajo
 
-### 4.1 Preparar datos
+### 4.1 Estructura RAW (múltiples runs por circuito)
 
 Coloca tus recorridos del simulador Udacity así (ver `data/README.md` para más detalle):
 
 ```
-data/raw/udacity/circuito1/driving_log.csv  +  data/raw/udacity/circuito1/IMG/
-data/raw/udacity/circuito2/driving_log.csv  +  data/raw/udacity/circuito2/IMG/
-```
+data/raw/udacity/circuito1/vuelta1/{driving_log.csv, IMG/}
+data/raw/udacity/circuito1/vuelta2/{driving_log.csv, IMG/}
+data/raw/udacity/circuito2/vuelta1/{driving_log.csv, IMG/}
+...
 
-Ejecuta **01_DATA_QC_PREP.ipynb** (kernel de `.venv`). Genera:
-- `data/processed/<run>/canonical.csv`
-- `data/processed/<run>/{train,val,test}.csv`
-- `data/processed/tasks.json` con el orden de tareas (p. ej. `["circuito1","circuito2"]`).
 
-> *(Opcional)* **01A_PREP_BALANCED.ipynb** genera `train_balanced.csv` por bins (oversampling) y gráficos de histograma.
+- Cada **circuito** puede tener **varias subvueltas** (`vuelta1`, `vuelta2`, …) que se **fusionan** en la preparación para formar un único conjunto por circuito.
 
-> *(Opcional)* **02_ENCODE_OFFLINE.ipynb** crea HDF5 con spikes si quieres depurar E/S o medir diferencias offline vs on‑the‑fly.
+### 4.2 Preparación de datos
 
-### 4.2 Entrenamiento continual
+Tienes dos opciones (elige una):
 
-Abre **03_TRAIN_CONTINUAL.ipynb** y ejecuta:
-- **Ejecución base** con preset `fast` para verificar la tubería.
-- **Comparativa de métodos**: `naive`, `ewc`, `rehearsal`, `rehearsal+ewc` (los dos últimos si están habilitados en `src/methods/`).  
-  Se guardan métricas en `outputs/` y un `continual_results.json` por run.
+- **Opción A (clásica)** · `01_DATA_QC_PREP.ipynb`
 
-*(Opcional)* **03B_HPO_OPTUNA.ipynb** lanza estudios Optuna sobre hiperparámetros de los métodos CL.
+Realiza QC (Quality Control) y normalización de rutas, fusión de subvueltas, estratificación por bins de steering y genera:
+
+  - `data/processed/<run>/{canonical,train,val,test}.csv`
+  - `data/processed/tasks.json (orden de tareas, p. ej. ["circuito1","circuito2"])`
+
+- **Opción B (recomendada y autónoma)** · `01A_PREP_BALANCED.ipynb`
+
+Ejecuta internamente los **SPLITS** (equivalentes a la opción A) y, además:
+
+  - si activas `prep.balance_offline.mode: images` en el `presets.yaml`, genera `train_balanced.csv` con imágenes aumentadas reales por bins y `tasks_balanced.json`,
+  - produce EDA rápida (histogramas/CSV por bins) por circuito para la memoria.
+
+> No es necesario lanzar `01_DATA_QC_PREP.ipynb` si usas `01A_PREP_BALANCED.ipynb`.
+
+### 4.3 Codificación a eventos (opcional offline)
+
+- `02_ENCODE_OFFLINE.ipynb` convierte los CSV (imágenes) a **spikes offline** (`.h5`) conforme a tu preset (`encoder: rate/latency`, `T`, `gain`, tamaño, gris/color).
+- Útil para comparativas controladas y depuración de E/S. Para la integración con simulador se usa **codificación online**.
+
+### 4.4 Entrenamiento continual
+
+- `03_TRAIN_CONTINUAL.ipynb` (o `tools/run_continual.py`) entrena una **secuencia de tareas** (p. ej., `circuito1 → circuito2`) con el método CL seleccionado en `configs/presets.yaml`.
+- Métodos previstos/soportados:
+  - naive (fine-tune secuencial),
+  - ewc (Elastic Weight Consolidation),
+  - rehearsal (memoria de repetición),
+  - **SA-SNN, AS-SNN, SCA-SNN, CoLaNET** (bio-inspirados).
+
+> Guarda métricas por tarea y olvido en `outputs/`.
+
+### 4.5 Búsqueda de hiperparámetros (HPO)
+
+- `03B_HPO_OPTUNA.ipynb` ejecuta Optuna con un **objetivo compuesto** que minimiza error final y penaliza el **olvido relativo**.
+- Registra el estudio (`sqlite`) y un CSV de trials.
+
+### 4.6 Resultados y figuras
+
+- `04_RESULTS.ipynb` agrega resultados (MAE/MSE por tarea, olvido absoluto/relativo, boxplots por seed, etc.) y genera figuras/tablas para la memoria.
+
+### 4.7 Integración con el simulador
+
+- `99_SIM_INTEGRATION.ipynb` guía la inferencia en ciclo cerrado usando **codificación online** y el cliente `tools/sim_drive.py`.
+Comprueba latencia/estabilidad y alinea parámetros con el preset (T, gain, tamaño, gris/color).
 
 ---
 
@@ -120,58 +174,158 @@ Abre **03_TRAIN_CONTINUAL.ipynb** y ejecuta:
 Archivo: `configs/presets.yaml`. Ejemplo mínimo (esquema actual):
 
 ```yaml
-fast:
-  model:
-    name: pilotnet_snn      # o: pilotnet_ann | snn_vision
+# =====================
+# PRESETS TFM — SNN/CL
+# =====================
+
+# ---- Bloque base (anclas) ----
+defaults: &defaults
+  model: &defaults_model
+    name: pilotnet_snn
     img_w: 200
     img_h: 66
     to_gray: true
 
-  data:
-    encoder: rate           # rate | latency | raw | image
-    T: 20
-    gain: 0.5               # solo 'rate'
+  data: &defaults_data
+    # Codificación
+    encoder: rate              # rate | latency | raw | image
+    T: 10
+    gain: 0.5
+    use_offline_spikes: true   # H5 offline
+    encode_runtime: false      # solo si use_offline_spikes=false
+
+    # Reproductibilidad / rendimiento
     seed: 42
-
-    # Fuente de datos y pipeline
-    use_offline_spikes: false   # usar H5 (spikes) si existen
-    encode_runtime: true        # si el loader entrega (B,C,H,W), codifica en GPU a (T,B,C,H,W)
-    use_offline_balanced: false # si existe tasks_balanced.json, úsalo
-
-    # DataLoader
     num_workers: 8
+    prefetch_factor: 2
     pin_memory: true
     persistent_workers: true
-    prefetch_factor: 4
 
-    # Augment (solo train; opcional)
-    aug_train: { prob_hflip: 0.3, brightness: [0.8, 1.2] }
+    # Aumentos (ligeros por defecto)
+    aug_train: &aug_light
+      prob_hflip: 0.5
+      brightness: [0.9, 1.1]
+      contrast:   [0.9, 1.1]
+      saturation: [0.9, 1.1]
+      hue:        [-0.03, 0.03]
+      gamma: null
+      noise_std: 0.0
 
-    # Balanceo online (entrenamiento)
+    # Balanceo online (desactivado por defecto)
     balance_online: false
-    # Si activas balance_online, puedes ajustar (o dejar None para usar defaults internos):
-    balance_bins: 21
+    balance_bins: 50
     balance_smooth_eps: 0.001
 
+  # División/prepare (offline)
+  prep: &defaults_prep
+    runs: ["circuito1", "circuito2"]  # o [] si autodetectas
+    merge_subruns: true
+    use_left_right: true
+    steer_shift: 0.2
+    bins: 50
+    train: 0.70
+    val: 0.15
+    seed: 42
+    # Balanceo offline de imágenes (si tu pipeline lo usa)
+    balance_offline:
+      mode: images            # images | none
+      target_per_bin: auto
+      cap_per_bin: 12000
+      aug:
+        prob_hflip: 0.0       # ← desactivar en offline, solo aumentos fotométricos
+        brightness: [0.8, 1.2]
+        contrast:   [0.8, 1.2]
+        saturation: [0.8, 1.2]
+        hue:        [-0.1, 0.1]
+        gamma: null
+        noise_std: 0.0
+    tasks_file_name: tasks.json
+    tasks_balanced_file_name: tasks_balanced.json
+    use_balanced_tasks: true
+    encode_h5: false   # (opcional). Se puede setear true en algún preset.
+
+  optim: &defaults_optim
+    amp: true
+    lr: 0.001
+    epochs: 2
+    es_patience: null
+    es_min_delta: null
+    batch_size: 64
+
+  # >>> EWC por defecto en TODOS los presets (salvo que se sobrescriba) <<<
+  continual: &defaults_continual
+    method: ewc
+    params:
+      lam: 1.0e9
+      fisher_batches: 1000
+
+  naming: &defaults_naming
+    tag: ""
+
+
+# ---- Presets ----
+
+fast:
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 10
   optim:
-    epochs: 8
-    batch_size: 32
-    lr: 1e-3
-    amp: true                # mixed precision si hay CUDA
-
+    <<: *defaults_optim
+    epochs: 2
+    batch_size: 64
   continual:
-    method: ewc              # naive | ewc | rehearsal | rehearsal+ewc
-    params: { lam: 7e8, fisher_batches: 800 }
+    <<: *defaults_continual
+    # EWC heredado (lam/fisher ya arriba)
+  prep:
+    <<: *defaults_prep
+    # p.ej. bins: 40   # (opcional, si quisieras menos bins)
 
-  naming:
-    tag: ""                  # etiqueta opcional para carpetas de salida
+std:
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 16
+  optim:
+    <<: *defaults_optim
+    lr: 5.0e-4
+    epochs: 8
+    batch_size: 56
+    es_patience: 3
+    es_min_delta: 1.0e-4
+  continual:
+    <<: *defaults_continual
+    params:
+      lam: 1.0e9
+      fisher_batches: 1200
+  prep:
+    <<: *defaults_prep
+
+accurate:
+  <<: *defaults
+  data:
+    <<: *defaults_data
+    T: 30
+  optim:
+    <<: *defaults_optim
+    lr: 7.5e-4
+    epochs: 20
+    batch_size: 16
+  continual:
+    method: rehearsal+ewc
+    params:
+      buffer_size: 3000
+      replay_ratio: 0.2
+      lam: 1.0e9
+      fisher_batches: 1500
+  prep:
+    <<: *defaults_prep
 ```
 
 **Notas**
 
-- Si `balance_online: true` y en el preset pones `balance_bins: null` o `balance_smooth_eps: null`,
-  el código usa por defecto `21` y `1e-3`. Evita errores de `NoneType → int/float` en notebooks.
-- `use_offline_spikes` y `encode_runtime` no deben estar **ambos** a `true` a la vez.
+- `use_offline_spikes` y `encode_runtime` no deben estar a true simultáneamente.
+- `01A_PREP_BALANCED.ipynb` respeta `prep.runs` si se definen; si no, **autodetecta** circuitos con `driving_log.csv` (en cualquier subcarpeta).
 
 ---
 
@@ -196,24 +350,26 @@ En `manifest.json` de entrenamiento guardamos:
 
 ## 7) Scripts útiles (CLI)
 
-- **QC + splits (tasks.json)**  
-  ```bash
-  python tools/prep_udacity.py --root . --runs circuito1 circuito2 --use-left-right --steer-shift 0.2 --bins 21 --train 0.70 --val 0.15 --seed 42
-  ```
-
-- **Pipeline prep completo (incluye balanceo con imágenes y, opcional, H5)**  
+- **Prep completa (splits + balanceo por imágenes + H5 opcional)**  
   ```bash
   python tools/prep_offline.py --preset fast --config configs/presets.yaml --encode
   ```
 
 - **Entrenamiento continual con preset**  
   ```bash
-  python tools/run_continual.py --preset fast --config configs/presets.yaml --tasks-file data/processed/tasks.json --tag prueba1
+  python tools/run_continual.py --preset fast --config configs/presets.yaml --tag prueba1
+  ```
+
+- **Codificación H5 en bloque según presets**  
+  ```bash
+  python tools/encode_tasks.py --config configs/presets.yaml
   ```
 
 - **Inferencia en simulador** (tras entrenar y exportar `model_best.pt`)  
   ```bash
-  python tools/sim_drive.py --host 127.0.0.1 --port 4567       --model-path outputs/continual_fast_ewc_rate_model-PilotNetSNN_66x200_gray_seed_42/model_best.pt       --model-name pilotnet_snn --img-w 200 --img-h 66 --to-gray       --encoder rate --T 20 --gain 0.5
+  python tools/sim_drive.py --host 127.0.0.1 --port 4567 --model-path <ruta_a_tu_modelo.pt> \
+    --model-name pilotnet_snn --img-w 200 --img-h 66 --to-gray \
+    --encoder rate --T 10 --gain 0.5
   ```
 
 Más detalle en [`tools/README_sim.md`](tools/README_sim.md).
@@ -231,10 +387,6 @@ Más detalle en [`tools/README_sim.md`](tools/README_sim.md).
 
 ## 9) Estado de métodos CL
 
-- **EWC** implementado e integrado.
-- **Rehearsal** básico disponible si lo activas en `METHODS` (notebooks).
-- Stubs de variantes (SA‑SNN / AS‑SNN / SCA‑SNN / CoLaNET) en `src/methods/` para desarrollo futuro.
+- **naive**, **ewc**, **rehearsal**, **rehearsal+ewc**, **sa-snn**, **as-snn**, **sca-snn**, **colanet**.
 
 ---
-
-¿Dudas? Abre un issue o comenta qué método te interesa seguir desarrollando.
