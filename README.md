@@ -112,7 +112,7 @@ Coloca tus recorridos del simulador Udacity así (ver `data/README.md` para más
 data/raw/udacity/circuito1/vuelta1/{driving_log.csv, IMG/}
 data/raw/udacity/circuito1/vuelta2/{driving_log.csv, IMG/}
 data/raw/udacity/circuito2/vuelta1/{driving_log.csv, IMG/}
-...
+```
 
 
 - Cada **circuito** puede tener **varias subvueltas** (`vuelta1`, `vuelta2`, …) que se **fusionan** en la preparación para formar un único conjunto por circuito.
