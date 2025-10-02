@@ -122,16 +122,11 @@ data/raw/udacity/circuito2/vuelta1/{driving_log.csv, IMG/}
 Tienes dos opciones (elige una):
 
 - **Opción A (clásica)** · `01_DATA_QC_PREP.ipynb`
-
 Realiza QC (Quality Control) y normalización de rutas, fusión de subvueltas, estratificación por bins de steering y genera:
-
   - `data/processed/<run>/{canonical,train,val,test}.csv`
   - `data/processed/tasks.json (orden de tareas, p. ej. ["circuito1","circuito2"])`
-
 - **Opción B (recomendada y autónoma)** · `01A_PREP_BALANCED.ipynb`
-
 Ejecuta internamente los **SPLITS** (equivalentes a la opción A) y, además:
-
   - si activas `prep.balance_offline.mode: images` en el `presets.yaml`, genera `train_balanced.csv` con imágenes aumentadas reales por bins y `tasks_balanced.json`,
   - produce EDA rápida (histogramas/CSV por bins) por circuito para la memoria.
 
