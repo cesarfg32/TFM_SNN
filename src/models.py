@@ -13,7 +13,7 @@ import torch.nn as nn
 import snntorch as snn
 from snntorch import surrogate
 
-class SNNVisionRegressor(nn.Module):
+class MiniSNN(nn.Module):
     def __init__(self, in_channels: int = 1, lif_beta: float = 0.95):
         super().__init__()
 
@@ -189,7 +189,7 @@ def build_model(name: str, tfm, **kwargs) -> nn.Module:
     H, W = tfm.h, tfm.w  # ojo: en tu ImageTransform guardas self.h/self.w
     n = name.lower()
     if n == "snn_vision":
-        return SNNVisionRegressor(in_channels=C, lif_beta=kwargs.pop("lif_beta", 0.95))
+        return MiniSNN(in_channels=C, lif_beta=kwargs.pop("lif_beta", 0.95))
     if n == "pilotnet_ann":
         return PilotNetANN(in_channels=C, input_hw=(H,W))
     if n == "pilotnet_snn":

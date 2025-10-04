@@ -115,8 +115,8 @@ std:
     lr: 5.0e-4
     epochs: 8
     batch_size: 56
-    es_patience: 3
-    es_min_delta: 1.0e-4
+    es_patience: 3          # ~37% de 8 épocas
+    es_min_delta: 5.0e-4    # umbral razonable para MAE
   continual:
     <<: *defaults_continual
     params:
@@ -135,6 +135,8 @@ accurate:
     lr: 7.5e-4
     epochs: 20
     batch_size: 16
+    es_patience: 5          # 25% de 20 épocas
+    es_min_delta: 7.5e-4    # sube a 1e-3 si ves ruido en val
   continual:
     method: rehearsal+ewc
     params:

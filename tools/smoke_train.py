@@ -23,7 +23,7 @@ import torch
 from torch import nn, optim
 from torch.amp import autocast, GradScaler
 
-from src.models import SNNVisionRegressor
+from src.models import MiniSNN
 from src.utils import set_seeds
 
 
@@ -42,9 +42,9 @@ def main():
     print("Dispositivo:", device.type)
 
     # Modelo simple (entrada sintética de 1 canal)
-    model = SNNVisionRegressor(in_channels=1, lif_beta=0.95).to(device)
+    model = MiniSNN(in_channels=1, lif_beta=0.95).to(device)
 
-    # Datos sintéticos: (B,T,C,H,W) -> SNNVisionRegressor espera (T,B,C,H,W)
+    # Datos sintéticos: (B,T,C,H,W) -> MiniSNN espera (T,B,C,H,W)
     B, T, C, H, W = args.batch, args.T, 1, 66, 200
 
     loss_fn = nn.MSELoss()

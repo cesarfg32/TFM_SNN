@@ -164,8 +164,8 @@ def universal_smoke_forward(
     print("x5d.device:", x5d.device, "| shape:", tuple(x5d.shape))
 
     # Modelo pequeño para prueba rápida
-    from src.models import SNNVisionRegressor
-    model = SNNVisionRegressor(in_channels=(1 if tfm.to_gray else 3), lif_beta=0.95).to(device).eval()
+    from src.models import MiniSNN
+    model = MiniSNN(in_channels=(1 if tfm.to_gray else 3), lif_beta=0.95).to(device).eval()
 
     # AMP solo si hay CUDA
     ctx = autocast('cuda', enabled=torch.cuda.is_available()) if torch.cuda.is_available() else nullcontext()
