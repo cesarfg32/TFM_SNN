@@ -27,7 +27,7 @@ defaults: &defaults
 
     # Aumentos (ligeros por defecto)
     aug_train: &aug_light
-      prob_hflip: 0.5
+      prob_hflip: 0.5       # ← solo en online
       brightness: [0.9, 1.1]
       contrast:   [0.9, 1.1]
       saturation: [0.9, 1.1]

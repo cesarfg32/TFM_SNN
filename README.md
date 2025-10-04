@@ -1,7 +1,7 @@
 # TFM — Aprendizaje Continuo con SNN para *steering* en conducción simulada (Udacity)
 
 Proyecto para investigar **aprendizaje continuo** (Continual Learning, **CL**) en **redes de impulsos** (Spiking Neural Networks, **SNN**) aplicado a **regresión del ángulo de dirección (*steering*)** en el simulador de Udacity.  
-Stack: **PyTorch + snnTorch**, ejecución local en **Linux/WSL2 + CUDA** o CPU.
+Stack: **PyTorch + snnTorch**, ejecución local en **Windows 11 Home/WSL2 + CUDA** o CPU.
 
 > **Datos**: organización y flujo en [`data/README.md`](data/README.md)
 > **Notebooks**: cómo preparar datos, validar pipeline y entrenar → [`notebooks/README.md`](notebooks/README.md)
