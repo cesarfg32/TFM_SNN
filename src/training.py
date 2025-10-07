@@ -5,6 +5,7 @@ import json, time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import os
 
 import torch
 from torch import nn, optim
@@ -60,14 +61,13 @@ def _permute_if_needed(x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
 
         if mode == "rate":
-            p  = (x * float(gain)).clamp_(0.0, 1.0)                     # (B,C,H,W)
-            pT = p.unsqueeze(0).expand(T, B, C, H, W)                   # (T,B,C,H,W)
+            p  = (x * float(gain)).clamp_(0.0, 1.0)                 # (B,C,H,W)
+            pT = p.unsqueeze(0).expand(T, B, C, H, W)               # (T,B,C,H,W)
             rnd = torch.rand((T, B, C, H, W), device=dev, dtype=p.dtype)
             out = (rnd < pT).to(x.dtype)
-
         elif mode == "latency":
             x1 = x.clamp(0.0, 1.0)
-            t_float = (1.0 - x1) * (T - 1)                              # (B,C,H,W)
+            t_float = (1.0 - x1) * (T - 1)                          # (B,C,H,W)
             t_idx = t_float.floor().to(torch.int64)
             out = torch.zeros((T, B, C, H, W), dtype=x.dtype, device=dev)
             mask = x1 > 0
@@ -75,13 +75,10 @@ def _permute_if_needed(x: torch.Tensor) -> torch.Tensor:
                 t_coords = t_idx[mask]
                 b, c, h, w = torch.where(mask)
                 out[t_coords, b, c, h, w] = 1.0
-
         elif mode == "raw":
             out = x.unsqueeze(0).expand(T, B, C, H, W).contiguous()
-
         else:
             raise ValueError(f"Unsupported runtime encode mode: {mode}")
-
         return out  # (T,B,C,H,W) en dev
 
     # Caso por defecto
@@ -127,7 +124,6 @@ def train_supervised(
     model = model.to(device)
 
     opt = optim.Adam(model.parameters(), lr=cfg.lr)
-
     use_amp = bool(cfg.amp and torch.cuda.is_available())
     scaler = GradScaler(enabled=use_amp)
 
@@ -137,6 +133,9 @@ def train_supervised(
     best_val = float("inf")
     patience_left = cfg.es_patience if (cfg.es_patience is not None and cfg.es_patience > 0) else None
     best_state = None
+
+    # --- NUEVO: contador global para logging periódico
+    global_step = 0
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -150,9 +149,38 @@ def train_supervised(
 
             with autocast("cuda", enabled=use_amp):
                 y_hat = model(x)
-                loss = loss_fn(y_hat, y)
-                if method is not None:
-                    loss = loss + method.penalty()
+
+                # Ajuste de forma robusto: si y_hat=(B,1) y y=(B,) -> y=(B,1)
+                if y_hat.ndim == 2 and y_hat.shape[1] == 1 and y.ndim == 1:
+                    y = y.unsqueeze(1)
+
+                loss_base = loss_fn(y_hat, y)
+
+            # Penalización EWC fuera del autocast (opcionalmente más estable)
+            pen = method.penalty() if method is not None else 0.0
+            loss = loss_base + pen
+
+            # --- Logging de diagnóstico (cada 50 steps) si hay método ---
+            log_inner  = bool(getattr(method, "inner_verbose", False))
+            log_every  = int(getattr(method, "inner_every", 50))
+            if method is not None and log_inner and (global_step % max(1, log_every) == 0):
+
+                base_val = float(loss_base.detach().item())
+                pen_val  = float(pen.detach().item()) if isinstance(pen, torch.Tensor) else float(pen)
+                ratio = pen_val / max(1e-8, base_val)
+                lam_suggest_msg = ""
+                try:
+                    curr_lam = getattr(getattr(method, "impl", None), "cfg", None)
+                    curr_lam = getattr(curr_lam, "lambd", None)
+                    if curr_lam is not None and base_val > 0.0 and pen_val > 0.0:
+                        target_ratio = 1.0
+                        lam_next = float(curr_lam) * (target_ratio / max(1e-8, ratio))
+                        lam_suggest_msg = (
+                            f" | λ_actual={float(curr_lam):.3e} → λ_sugerido≈{lam_next:.3e} (target pen/base={target_ratio})"
+                        )
+                except Exception:
+                    pass
+                print(f"[EWC] base={base_val:.4g} | pen={pen_val:.4g} | pen/base={ratio:.3f}{lam_suggest_msg}")
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -165,7 +193,8 @@ def train_supervised(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
 
-            running += loss.item()
+            running += float(loss.detach().item())
+            global_step += 1
 
         train_loss = running / max(1, len(train_loader))
 
@@ -178,8 +207,11 @@ def train_supervised(
                 y = y.to(device, non_blocking=True)
                 with autocast("cuda", enabled=use_amp):
                     y_hat = model(x)
+                    # Mismo ajuste de forma que en train
+                    if y_hat.ndim == 2 and y_hat.shape[1] == 1 and y.ndim == 1:
+                        y = y.unsqueeze(1)
                     v_loss = loss_fn(y_hat, y)
-                v_running += v_loss.item()
+                v_running += float(v_loss.detach().item())
 
         val_loss = v_running / max(1, len(val_loader))
         history["train_loss"].append(train_loss)
@@ -194,9 +226,9 @@ def train_supervised(
             if improved:
                 best_val = val_loss
                 patience_left = cfg.es_patience
-                # además de mantener best_state en memoria, lo guardamos a disco
+                # guarda best
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-                torch.save(best_state, best_ckpt)  # guarda best
+                torch.save(best_state, best_ckpt)
             else:
                 patience_left -= 1
                 if patience_left <= 0:

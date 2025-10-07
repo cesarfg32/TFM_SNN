@@ -8,6 +8,8 @@ from typing import Dict, Any
 from src.training import TrainConfig, train_supervised, set_encode_runtime
 from src.methods.registry import build_method
 from src.eval import eval_loader
+from src.telemetry import carbon_tracker_ctx, log_telemetry_event, system_snapshot
+import os, time as _time
 
 # Asegura raíz en sys.path (igual que tenías)
 ROOT = Path.cwd().parents[0] if (Path.cwd().name == "notebooks") else Path.cwd()
@@ -36,7 +38,7 @@ def run_continual(
 
     epochs   = int(optim["epochs"])
     bs       = int(optim["batch_size"])
-    use_amp  = bool(optim["amp"])
+    use_amp  = bool(optim["amp"] and torch.cuda.is_available())
     lr       = float(optim["lr"])
 
     # -----------------------------
@@ -91,6 +93,22 @@ def run_continual(
     method_kwargs.setdefault("T", T)
 
     method_obj = build_method(method, model, loss_fn=loss_fn, device=device, **method_kwargs)
+
+    # === NUEVO (genérico): inyecta TODO lo que haya en logging.<método> como atributos ===
+    log_root    = cfg.get("logging", {}) or {}
+    log_section = log_root.get(method.lower(), {})
+
+    # fallback opcional si el nombre es compuesto (p.ej., "rehearsal+ewc"):
+    if not log_section and "+" in method:
+        log_section = log_root.get(method.split("+")[0].lower(), {})
+
+    # aplica todas las claves (p.ej., inner_verbose, inner_every, fisher_verbose, etc.)
+    for k, v in (log_section or {}).items():
+        try:
+            setattr(method_obj, k, v)
+        except Exception:
+            pass
+
     tag = method_obj.name
     if ("ewc" in tag) and ("lam" in method_kwargs):
         tag = f"{tag}_lam_{float(method_kwargs['lam']):.0e}"
@@ -105,7 +123,21 @@ def run_continual(
     # -----------------------------
     # 5) Entrenamiento por tareas
     # -----------------------------
-    tcfg = TrainConfig(epochs=epochs, batch_size=bs, lr=lr, amp=use_amp, seed=seed)
+    # Early Stopping desde el preset (si está configurado)
+    es_pat = optim.get("es_patience", None)
+    es_md  = optim.get("es_min_delta", None)
+    es_pat = int(es_pat) if es_pat is not None else None
+    es_md  = float(es_md) if es_md is not None else 0.0
+
+    tcfg = TrainConfig(
+        epochs=epochs,
+        batch_size=bs,
+        lr=lr,
+        amp=use_amp,
+        seed=seed,
+        es_patience=es_pat,
+        es_min_delta=es_md,
+    )
     results, seen = {}, []
 
     for i, t in enumerate(task_list, start=1):
