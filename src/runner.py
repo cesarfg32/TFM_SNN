@@ -8,13 +8,17 @@ from typing import Dict, Any
 from src.training import TrainConfig, train_supervised, set_encode_runtime
 from src.methods.registry import build_method
 from src.eval import eval_loader
+
+# Telemetría
 from src.telemetry import carbon_tracker_ctx, log_telemetry_event, system_snapshot
+from contextlib import nullcontext
 import os, time as _time
 
 # Asegura raíz en sys.path (igual que tenías)
 ROOT = Path.cwd().parents[0] if (Path.cwd().name == "notebooks") else Path.cwd()
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
+
 
 def run_continual(
     task_list: list[dict],
@@ -94,15 +98,11 @@ def run_continual(
 
     method_obj = build_method(method, model, loss_fn=loss_fn, device=device, **method_kwargs)
 
-    # === NUEVO (genérico): inyecta TODO lo que haya en logging.<método> como atributos ===
+    # === Logging por preset: logging.<método> ===
     log_root    = cfg.get("logging", {}) or {}
     log_section = log_root.get(method.lower(), {})
-
-    # fallback opcional si el nombre es compuesto (p.ej., "rehearsal+ewc"):
     if not log_section and "+" in method:
         log_section = log_root.get(method.split("+")[0].lower(), {})
-
-    # aplica todas las claves (p.ej., inner_verbose, inner_every, fisher_verbose, etc.)
     for k, v in (log_section or {}).items():
         try:
             setattr(method_obj, k, v)
@@ -121,69 +121,105 @@ def run_continual(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------
-    # 5) Entrenamiento por tareas
+    # Telemetría (activada por preset: logging.telemetry)
     # -----------------------------
-    # Early Stopping desde el preset (si está configurado)
-    es_pat = optim.get("es_patience", None)
-    es_md  = optim.get("es_min_delta", None)
-    es_pat = int(es_pat) if es_pat is not None else None
-    es_md  = float(es_md) if es_md is not None else 0.0
+    tele_cfg    = (cfg.get("logging", {}) or {}).get("telemetry", {}) or {}
+    use_cc      = bool(tele_cfg.get("codecarbon", False))
+    cc_offline  = bool(tele_cfg.get("offline", True))
+    cc_country  = tele_cfg.get("country_iso_code") or os.getenv("CODECARBON_COUNTRY_ISO_CODE", None)
+    cc_period   = int(tele_cfg.get("measure_power_secs", 15))
 
-    tcfg = TrainConfig(
-        epochs=epochs,
-        batch_size=bs,
-        lr=lr,
-        amp=use_amp,
-        seed=seed,
-        es_patience=es_pat,
-        es_min_delta=es_md,
-    )
-    results, seen = {}, []
+    log_telemetry_event(out_dir, {
+        "event": "run_start",
+        "preset": preset_name, "method": method_obj.name,
+        "encoder": encoder, "T": T, "batch_size": bs, "amp": use_amp,
+        "out_dir": str(out_dir),
+        **system_snapshot(),
+    })
 
-    for i, t in enumerate(task_list, start=1):
-        name = t["name"]
-        if verbose:
-            print(
-                f"\n--- Tarea {i}/{len(task_list)}: {name} | preset={preset_name} | method={method_obj.name} "
-                f"| B={bs} T={T} AMP={use_amp} | enc={encoder} ---"
+    t_start = _time.time()
+
+    # Construye el contexto de CodeCarbon si está habilitado
+    cc_context = carbon_tracker_ctx(
+        out_dir,
+        project_name=out_tag,
+        offline=cc_offline,
+        country_iso_code=cc_country,
+        measure_power_secs=cc_period,
+    ) if use_cc else nullcontext()
+
+    with cc_context as _cc:
+        # -----------------------------
+        # 5) Entrenamiento por tareas
+        # -----------------------------
+        # Early Stopping desde el preset (si está configurado)
+        es_pat = optim.get("es_patience", None)
+        es_md  = optim.get("es_min_delta", None)
+        es_pat = int(es_pat) if es_pat is not None else None
+        es_md  = float(es_md) if es_md is not None else 0.0
+
+        tcfg = TrainConfig(
+            epochs=epochs,
+            batch_size=bs,
+            lr=lr,
+            amp=use_amp,
+            seed=seed,
+            es_patience=es_pat,
+            es_min_delta=es_md,
+        )
+        results, seen = {}, []
+
+        for i, t in enumerate(task_list, start=1):
+            name = t["name"]
+            if verbose:
+                print(
+                    f"\n--- Tarea {i}/{len(task_list)}: {name} | preset={preset_name} | method={method_obj.name} "
+                    f"| B={bs} T={T} AMP={use_amp} | enc={encoder} ---"
+                )
+
+            # DataLoaders (H5 ó CSV+runtime encode, según factory)
+            tr, va, te = make_loader_fn(
+                task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
             )
 
-        # DataLoaders (H5 ó CSV+runtime encode, según factory)
-        tr, va, te = make_loader_fn(
-            task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
-        )
+            # Si el loader entrega 4D (C,H,W), activar runtime encode en GPU
+            xb_sample, _ = next(iter(tr))
+            used_rt = False
+            if xb_sample.ndim == 4:
+                set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
+                used_rt = True
+                if verbose: print("  runtime encode: ON (GPU)")
 
-        # Si el loader entrega 4D (C,H,W), activar runtime encode en GPU
-        xb_sample, _ = next(iter(tr))
-        used_rt = False
-        if xb_sample.ndim == 4:
-            set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
-            used_rt = True
-            if verbose: print("  runtime encode: ON (GPU)")
+            # Si el método (o un composite) propone envolver el loader (p.ej. Rehearsal), respétalo
+            if hasattr(method_obj, "prepare_train_loader"):
+                tr = method_obj.prepare_train_loader(tr)
 
-        # Si el método (o un composite) propone envolver el loader (p.ej. Rehearsal), respétalo
-        if hasattr(method_obj, "prepare_train_loader"):
-            tr = method_obj.prepare_train_loader(tr)
+            # Hooks del método antes/después de cada tarea
+            method_obj.before_task(model, tr, va)
+            _ = train_supervised(model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj)
 
-        # Hooks del método antes/después de cada tarea
-        method_obj.before_task(model, tr, va)
-        _ = train_supervised(model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj)
-        method_obj.after_task(model, tr, va)
+            # ⚡ Evita calcular Fisher en la última tarea: ahorra MUCHO tiempo
+            if i < len(task_list) and hasattr(method_obj, "after_task"):
+                method_obj.after_task(model, tr, va)
 
-        # Eval en test de la tarea actual
-        te_mae, te_mse = eval_loader(te, model, device)
-        results[name] = {"test_mae": te_mae, "test_mse": te_mse}
-        seen.append((name, te))
+            # Eval en test de la tarea actual
+            te_mae, te_mse = eval_loader(te, model, device)
+            results[name] = {"test_mae": te_mae, "test_mse": te_mse}
+            seen.append((name, te))
 
-        # Eval de olvido: re-evalúa test loaders de tareas previas
-        for pname, p_loader in seen[:-1]:
-            p_mae, p_mse = eval_loader(p_loader, model, device)
-            results[pname][f"after_{name}_mae"] = p_mae
-            results[pname][f"after_{name}_mse"] = p_mse
+            # Eval de olvido: re-evalúa test loaders de tareas previas
+            for pname, p_loader in seen[:-1]:
+                p_mae, p_mse = eval_loader(p_loader, model, device)
+                results[pname][f"after_{name}_mae"] = p_mae
+                results[pname][f"after_{name}_mse"] = p_mse
 
-        if used_rt:
-            set_encode_runtime(None)
-            if verbose: print("  runtime encode: OFF")
+            if used_rt:
+                set_encode_runtime(None)
+                if verbose: print("  runtime encode: OFF")
+
+        # Asegura flush de kernels antes de cerrar el tracker
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
     # Guardar resultados
     (out_dir / "continual_results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
@@ -194,5 +230,13 @@ def run_continual(
             method_obj.detach()
         except Exception:
             pass
+
+    elapsed = _time.time() - t_start
+    emissions_kg = getattr(locals().get("_cc", None), "final_emissions", None)
+    log_telemetry_event(out_dir, {
+        "event": "run_end",
+        "elapsed_sec": elapsed,
+        "emissions_kg": emissions_kg,
+    })
 
     return out_dir, results
