@@ -13,6 +13,7 @@ from src.eval import eval_loader
 from src.telemetry import carbon_tracker_ctx, log_telemetry_event, system_snapshot
 from contextlib import nullcontext
 import os, time as _time
+import logging
 
 # Asegura raíz en sys.path (igual que tenías)
 ROOT = Path.cwd().parents[0] if (Path.cwd().name == "notebooks") else Path.cwd()
@@ -128,6 +129,13 @@ def run_continual(
     cc_offline  = bool(tele_cfg.get("offline", True))
     cc_country  = tele_cfg.get("country_iso_code") or os.getenv("CODECARBON_COUNTRY_ISO_CODE", None)
     cc_period   = int(tele_cfg.get("measure_power_secs", 15))
+    cc_loglvl   = str(tele_cfg.get("log_level", "warning")).lower()
+
+    # Bajar verbosidad del logger de CodeCarbon (funciona incluso si EmissionsTracker no acepta log_level)
+    try:
+        logging.getLogger("codecarbon").setLevel(getattr(logging, cc_loglvl.upper(), logging.WARNING))  # ← NUEVO
+    except Exception:
+        pass
 
     log_telemetry_event(out_dir, {
         "event": "run_start",
@@ -146,6 +154,7 @@ def run_continual(
         offline=cc_offline,
         country_iso_code=cc_country,
         measure_power_secs=cc_period,
+        log_level=cc_loglvl,
     ) if use_cc else nullcontext()
 
     with cc_context as _cc:

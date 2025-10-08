@@ -90,6 +90,7 @@ defaults: &defaults
       offline: true
       country_iso_code: "ESP"
       measure_power_secs: 15
+      log_level: "error"
     ewc:
       fisher_verbose: true   # true -> imprime “after_task: estimando Fisher...” y el resumen
       inner_verbose:  true   # true -> logs dentro del loop de entrenamiento
