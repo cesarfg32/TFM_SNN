@@ -95,6 +95,13 @@ defaults: &defaults
       fisher_verbose: true   # true -> imprime “after_task: estimando Fisher...” y el resumen
       inner_verbose:  true   # true -> logs dentro del loop de entrenamiento
       inner_every:    100      # cada cuántos steps imprimir (si inner_verbose=true)
+    rehearsal:
+      buffer_verbose: true       # resumen del buffer al terminar cada tarea
+      replay_verbose: true       # detalles del mix (task_bs/replay_bs/buffer_len)
+      replay_show_shapes: false  # añade shapes si quieres (puede ser ruidoso)
+    as-snn:
+      activity_verbose: true     # trazas periódicas de actividad y penalty
+      activity_every: 200
 
   naming: &defaults_naming
     tag: ""

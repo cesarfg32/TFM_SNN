@@ -88,6 +88,11 @@ class AS_SNN:
         # Handle del hook para poder desregistrarlo si hiciera falta
         self._hook_handle: Optional[torch.utils.hooks.RemovableHandle] = None
 
+        # ---- Flags de logging inyectables desde preset ----
+        self.activity_verbose: bool = False  # imprime estado de actividad
+        self.activity_every: int = 100       # frecuencia (batches)
+        self._batch_idx: int = 0
+
     # -------------------------------------------------------------------------
     # Utilidades internas
     # -------------------------------------------------------------------------
@@ -181,6 +186,19 @@ class AS_SNN:
         # Guardamos la penalty ya escalada; DETACHED (no crea grafos)
         self._penalty_value = (self.lambda_a * phi).detach()
 
+        # ---- Logging opcional y barato ----
+        self._batch_idx += 1
+        if getattr(self, "activity_verbose", False):
+            every = max(1, int(getattr(self, "activity_every", 100)))
+            if (self._batch_idx % every) == 0:
+                try:
+                    a_ema = float(self._alpha_ema.item())
+                    a_now = float(alpha_now.item())
+                    pen = float(self._penalty_value.item()) if self._penalty_value is not None else 0.0
+                    print(f"[AS-SNN] α_now={a_now:.4f} | α_ema={a_ema:.4f} | γ={self.gamma_ratio:.2f} | λ_a={self.lambda_a:.3g} | pen={pen:.4g}")
+                except Exception:
+                    pass
+
     # -------------------------------------------------------------------------
     # API ContinualMethod
     # -------------------------------------------------------------------------
@@ -232,6 +250,14 @@ class AS_SNN:
         #     self._hook_handle.remove()
         #     self._hook_handle = None
         pass
+
+    def detach(self) -> None:
+        if self._hook_handle is not None:
+            try:
+                self._hook_handle.remove()
+            except Exception:
+                pass
+            self._hook_handle = None
 
     # -------------------------------------------------------------------------
     # Utilidad introspectiva (debug / logging opcional)

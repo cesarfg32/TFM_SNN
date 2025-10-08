@@ -100,13 +100,27 @@ def run_continual(
     method_obj = build_method(method, model, loss_fn=loss_fn, device=device, **method_kwargs)
 
     # === Logging por preset: logging.<método> ===
-    log_root    = cfg.get("logging", {}) or {}
-    log_section = log_root.get(method.lower(), {})
-    if not log_section and "+" in method:
-        log_section = log_root.get(method.split("+")[0].lower(), {})
-    for k, v in (log_section or {}).items():
+    log_root = (cfg.get("logging", {}) or {})
+
+    def _apply_log_section(obj, key: str):
+        sect = log_root.get(key, {}) or {}
+        for k, v in sect.items():
+            try:
+                setattr(obj, k, v)
+            except Exception:
+                pass
+
+    # aplica al método principal
+    _apply_log_section(method_obj, method.lower())
+
+    # si es composite y expone submétodos, intenta aplicar por nombre base de cada uno
+    if hasattr(method_obj, "methods"):
         try:
-            setattr(method_obj, k, v)
+            for sub in getattr(method_obj, "methods", []):
+                # nombre base: 'ewc', 'rehearsal', 'as-snn', etc. antes de '_' o '+'
+                base = str(getattr(sub, "name", "")).lower().split("+")[0].split("_")[0]
+                if base:
+                    _apply_log_section(sub, base)
         except Exception:
             pass
 

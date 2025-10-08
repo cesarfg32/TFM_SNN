@@ -109,6 +109,11 @@ class RehearsalMethod:
         rr = int(round(cfg.replay_ratio * 100))
         self.name = f"rehearsal_buf_{cfg.buffer_size}_rr_{rr}"
 
+        # ---- Flags de logging inyectables desde el preset (runner hace setattr) ----
+        self.buffer_verbose: bool = False      # resumen al cerrar cada tarea
+        self.replay_verbose: bool = False      # info al construir el loader mixto
+        self.replay_show_shapes: bool = False  # imprimir shapes estimadas
+
     # --- API ContinualMethod ---
     def penalty(self) -> torch.Tensor:
         # No añade regularización de pérdida
@@ -120,34 +125,44 @@ class RehearsalMethod:
         self._last_task_loader = train_loader
 
     def after_task(self, model, train_loader: DataLoader, val_loader: DataLoader) -> None:
-        # Al finalizar, añadimos muestras de la tarea al buffer
         if self._last_task_loader is not None:
-            self.buffer.add_from_loader(self._last_task_loader)
+            before = len(self.buffer)
+            added = self.buffer.add_from_loader(self._last_task_loader)
+            now = len(self.buffer)
             self._last_task_loader = None
 
-    # --- Hook opcional para training: envolver el train_loader ---
+            if getattr(self, "buffer_verbose", False):
+                cap = self.buffer.buffer_size
+                print(f"[Rehearsal] buffer += {added} (total={now}/{cap}) | seen={self.buffer.num_seen}")
+
     def prepare_train_loader(self, train_loader: DataLoader) -> DataLoader | _ReplayMixLoader:
-        """Devuelve un loader mixto (tarea+replay) si hay buffer; si no, el original."""
         if len(self.buffer) == 0 or self.cfg.replay_ratio <= 0.0:
             return train_loader
 
-        # tamaños de sub-batch
         total_bs = int(getattr(train_loader, "batch_size", None) or 0)
         if total_bs <= 0:
-            # fallback: mira un batch
             try:
                 xb, _ = next(iter(train_loader))
                 total_bs = int(xb.shape[0])
             except Exception:
-                total_bs = 8  # último recurso
+                total_bs = 8
 
         rep_bs = max(1, int(round(total_bs * self.cfg.replay_ratio)))
         task_bs = max(1, total_bs - rep_bs)
         if task_bs + rep_bs != total_bs:
-            # ajusta por redondeos
             rep_bs = total_bs - task_bs
 
-        # DataLoader del buffer
+        if getattr(self, "replay_verbose", False):
+            msg = f"[Rehearsal] mix: task_bs={task_bs} | replay_bs={rep_bs} | total_bs={total_bs} | buf_len={len(self.buffer)}"
+            if getattr(self, "replay_show_shapes", False):
+                try:
+                    xb_t, _ = next(iter(train_loader))
+                    xb_r, _ = next(iter(DataLoader(self.buffer.as_dataset(), batch_size=rep_bs)))
+                    msg += f" | x_task.shape={tuple(xb_t.shape)} x_rep.shape={tuple(xb_r.shape)}"
+                except Exception:
+                    pass
+            print(msg)
+
         replay_ds = self.buffer.as_dataset()
         replay_loader = DataLoader(
             replay_ds,
@@ -158,3 +173,8 @@ class RehearsalMethod:
             persistent_workers=getattr(train_loader, "persistent_workers", False),
         )
         return _ReplayMixLoader(train_loader, replay_loader, task_bs, rep_bs)
+
+    # liberar memoria si runner llama .detach()
+    def detach(self) -> None:
+        # Si quieres conservar el buffer entre tareas/experimentos, comenta la línea de abajo.
+        self.buffer.reservoir.clear()
