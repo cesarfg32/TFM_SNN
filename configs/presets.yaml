@@ -212,7 +212,7 @@ accurate:
   logging:
     sa-snn:
       trace_verbose: true     # o false si quieres silencio total
-      trace_every: 4096        # 512–1024 para std; 1024–2048 para accurate
+      trace_every: 8192        # 512–1024 para std; 1024–2048 para accurate
 
 as_snn:
   <<: *defaults
