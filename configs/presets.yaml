@@ -104,8 +104,10 @@ defaults: &defaults
       activity_every: 200
     sa-snn:
       trace_verbose: true
-      trace_every: 100
-
+      trace_every: 8192
+    sca-snn:
+      verbose: true       # imprime trazas periódicas
+      log_every: 50      # ajústalo según batch_size/longitud del run
   naming: &defaults_naming
     tag: ""
 
@@ -172,9 +174,7 @@ std:
   prep:
     <<: *defaults_prep
   logging:
-    sa-snn:
-      trace_verbose: true     # o false si quieres silencio total
-      trace_every: 512        # 512–1024 para std; 1024–2048 para accurate
+    <<: *defaults_logging
 
 accurate:
   <<: *defaults
@@ -210,9 +210,7 @@ accurate:
   prep:
     <<: *defaults_prep
   logging:
-    sa-snn:
-      trace_verbose: true     # o false si quieres silencio total
-      trace_every: 8192        # 512–1024 para std; 1024–2048 para accurate
+    <<: *defaults_logging
 
 as_snn:
   <<: *defaults

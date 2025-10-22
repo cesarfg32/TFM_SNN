@@ -76,7 +76,7 @@ def carbon_tracker_ctx(
     """
     Devuelve un context manager. Si CodeCarbon está instalado -> EmissionsTracker.
     Si no, devuelve un no-op con atributo .final_emissions = None.
-    Soporta versiones antiguas/nuevas (filtra kwargs incompatibles).
+    Compatible con varias versiones (filtrado de kwargs y fallback a env vars).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -90,35 +90,52 @@ def carbon_tracker_ctx(
             yield _Dummy()
         return _noop()
 
-    # Construimos kwargs compatibles con la versión instalada
-    base_kwargs: Dict[str, Any] = {
-        "project_name": project_name,
-        "output_dir": str(out_dir),
-        "save_to_file": True,            # genera emissions.csv
-        "measure_power_secs": measure_power_secs,
-        "log_level": log_level,
-    }
-    if country_iso_code:
-        base_kwargs["country_iso_code"] = country_iso_code
-
-    # Inspecciona la firma de __init__ para filtrar & mapear
+    # Firma del constructor para saber qué kwargs admite esta versión
     try:
         sig = inspect.signature(EmissionsTracker.__init__)
         params = set(sig.parameters.keys())
     except Exception:
         params = set()
 
-    # Algunas versiones aceptan 'offline'; otras usan 'save_to_api'
+    # Construimos kwargs mínimos y filtrados
+    base_kwargs: Dict[str, Any] = {
+        "project_name": project_name,
+        "output_dir": str(out_dir),
+        "save_to_file": True,               # genera emissions.csv
+        "measure_power_secs": measure_power_secs,
+        "log_level": log_level,
+    }
+
+    # Modo offline: algunas versiones tienen `offline`, otras usan `save_to_api`
     if "offline" in params:
         base_kwargs["offline"] = bool(offline)
     elif "save_to_api" in params:
-        # Offline => no intentes subir a la API
         base_kwargs["save_to_api"] = False
 
-    # Filtra solo los kwargs soportados por esta versión
+    # country_iso_code: si el ctor NO lo soporta, lo pasamos por variable de entorno
+    if country_iso_code:
+        if "country_iso_code" in params:
+            base_kwargs["country_iso_code"] = country_iso_code
+        else:
+            # Fallback para todas las versiones
+            os.environ.setdefault("CODECARBON_COUNTRY_ISO_CODE", str(country_iso_code))
+
+    # Filtra estrictamente kwargs soportados en esta versión
     filtered = {k: v for k, v in base_kwargs.items() if (not params or k in params)}
 
-    tracker = EmissionsTracker(**filtered)
+    # Crear tracker con un retry defensivo si aún así falla por kwargs
+    try:
+        tracker = EmissionsTracker(**filtered)
+    except TypeError as e:
+        # Quita claves potencialmente problemáticas y reintenta minimalista
+        filtered.pop("country_iso_code", None)
+        filtered.pop("measure_power_secs", None)
+        try:
+            tracker = EmissionsTracker(**filtered)
+        except Exception:
+            # Último recurso: configura solo lo imprescindible
+            minimal = {k: filtered[k] for k in filtered.keys() & {"project_name", "output_dir", "save_to_file"}}
+            tracker = EmissionsTracker(**minimal)
 
     @contextmanager
     def _ctx():
@@ -142,21 +159,18 @@ def carbon_tracker_ctx(
 # Lectura de emisiones desde emissions.csv (CodeCarbon)
 # ----------------------------------------------------
 def read_emissions_kg(out_dir: Path | str) -> Optional[float]:
-    """
-    Busca emissions.csv en out_dir. Devuelve la última columna 'emissions' (kg) si existe.
-    Robusto a encabezados con distinto orden.
-    """
     csv_path = Path(out_dir) / "emissions.csv"
     if not csv_path.exists():
         return None
-
     try:
-        last_val: Optional[float] = None
+        last_val = None
         with csv_path.open("r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
+            # acepta 'emissions' o 'emissions_kg'
             field = None
             for c in reader.fieldnames or []:
-                if c.lower().strip() == "emissions":
+                cl = c.lower().strip()
+                if cl in ("emissions", "emissions_kg", "co2e"):
                     field = c
                     break
             if field is None:
@@ -170,3 +184,4 @@ def read_emissions_kg(out_dir: Path | str) -> Optional[float]:
         return last_val
     except Exception:
         return None
+
