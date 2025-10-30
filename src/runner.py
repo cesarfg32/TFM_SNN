@@ -59,12 +59,10 @@ def _build_eval_matrix(results: Dict[str, Dict[str, float]]) -> Tuple[List[str],
     n = len(names)
     mat = [[math.nan for _ in range(n)] for _ in range(n)]
     for i, ti in enumerate(names):
-        # valor al completar su propia tarea
         mat[i][i] = float(results[ti].get("test_mae", math.nan))
-        # valores "after_*"
         for j, tj in enumerate(names):
-            if j < i:
-                continue  # no existe evaluación "futura" antes de entrenar esa tarea
+            if j < i:  # no existe evaluación "futura" antes de entrenar esa tarea
+                continue
             if j == i:
                 continue
             key = f"after_{tj}_mae"
@@ -85,8 +83,8 @@ def _compute_forgetting(names: List[str], mat: List[List[float]]) -> Dict[str, D
         if not row:
             out[names[i]] = {"forget_abs": math.nan, "forget_rel": math.nan}
             continue
-        best = min(row)          # mejor MAE alcanzado en cualquier punto
-        final = row[-1]          # MAE tras última tarea
+        best = min(row)
+        final = row[-1]
         f_abs = float(final - best)
         f_rel = float(f_abs / best) if best > 0 else math.nan
         out[names[i]] = {"forget_abs": f_abs, "forget_rel": f_rel, "best_mae": best, "final_mae": final}
@@ -102,6 +100,28 @@ def _torch_cuda_mem_peak_mb() -> float | None:
 
 def _torch_num_params(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
+
+# ==== NUEVO: helpers para curvas y nombre de c2 ====
+def _to_csv_lines_from_history(history: dict) -> str:
+    """Convierte history={'train_loss':[...], 'val_loss':[...]} a CSV 'epoch,train_loss,val_loss'."""
+    L = max(len(history.get("train_loss", [])), len(history.get("val_loss", [])))
+    lines = ["epoch,train_loss,val_loss"]
+    for e in range(L):
+        tr = history.get("train_loss", [None]*L)[e]
+        va = history.get("val_loss",   [None]*L)[e]
+        tr_s = "" if tr is None else f"{float(tr):.8f}"
+        va_s = "" if va is None else f"{float(va):.8f}"
+        lines.append(f"{e+1},{tr_s},{va_s}")
+    return "\n".join(lines)
+
+def _pick_c2_name(task_names: List[str]) -> str | None:
+    """Heurística robusta para localizar 'circuito2'/track2 en tus nombres."""
+    import re
+    for n in task_names:
+        if re.search(r"(c2|circuito2|track2|tarea2|task2)", n, re.I):
+            return n
+    return task_names[1] if len(task_names) >= 2 else (task_names[-1] if task_names else None)
+# ================================================
 
 def run_continual(
     task_list: list[dict],
@@ -325,17 +345,32 @@ def run_continual(
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
             t0 = _time.time()
-            _ = train_supervised(model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj)
+
+            # === ENTRENAR Y CAPTURAR CURVAS ===
+            history = train_supervised(
+                model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
+            )
+
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t1 = _time.time()
             mem_peak = _torch_cuda_mem_peak_mb()
+
+            # NEW: persistir curva por época (CSV legible)
+            try:
+                csv_curve = _to_csv_lines_from_history(history or {})
+                (out_dir / f"task_{i}_{name}" / "loss_curves.csv").write_text(csv_curve, encoding="utf-8")
+            except Exception:
+                pass
+
+            n_epochs_done = len((history or {}).get("val_loss", []))
 
             perf_rows.append({
                 "task_idx": i, "task_name": name,
                 "train_time_sec": t1 - t0,
                 "cuda_mem_peak_mb": mem_peak,
                 "batch_size": bs, "amp": use_amp, "encoder": encoder, "T": T,
+                "epochs_done": n_epochs_done,  # NEW
             })
 
             # Evita calcular Fisher en la última tarea: ahorra MUCHO tiempo
@@ -430,6 +465,60 @@ def run_continual(
         "model": model_lbl,
     }
     _safe_write(out_dir / "efficiency_summary.json", summary)
+
+    # NEW: guardar los parámetros efectivos del método (para documentar barridos)
+    try:
+        _safe_write(out_dir / "method_params.json", method_kwargs)
+    except Exception:
+        pass
+
+    # NEW: fila resumen para tablas rápidas (CSV + JSON)
+    c2_name = _pick_c2_name(names) or (names[-1] if names else None)
+    c2_final_mae = None
+    if c2_name is not None:
+        row_idx = names.index(c2_name)
+        row_vals = [v for v in mat[row_idx] if not math.isnan(v)]
+        if row_vals:
+            c2_final_mae = float(row_vals[-1])
+
+    avg_forget_rel = None
+    try:
+        vals = [v.get("forget_rel") for v in forgetting.values() if isinstance(v, dict) and "forget_rel" in v]
+        vals = [float(x) for x in vals if (x is not None and not math.isnan(x))]
+        if vals:
+            avg_forget_rel = sum(vals)/len(vals)
+    except Exception:
+        pass
+
+    run_row = {
+        "exp": out_dir.name,
+        "preset": preset_name,
+        "method": method_obj.name,
+        "encoder": encoder,
+        "model": model_lbl,
+        "seed": seed,
+        "c2_final_mae": c2_final_mae,
+        "avg_forget_rel": avg_forget_rel,
+        "emissions_kg": emissions_kg,
+        "elapsed_sec": elapsed,
+    }
+    _safe_write(out_dir / "run_row.json", run_row)
+    (out_dir / "run_row.csv").write_text(
+        "exp,preset,method,encoder,model,seed,c2_final_mae,avg_forget_rel,emissions_kg,elapsed_sec\n"
+        + ",".join([
+            str(run_row["exp"]),
+            str(run_row["preset"]),
+            str(run_row["method"]),
+            str(run_row["encoder"]),
+            str(run_row["model"]),
+            str(run_row["seed"]),
+            "" if run_row["c2_final_mae"]   is None else f"{run_row['c2_final_mae']:.8f}",
+            "" if run_row["avg_forget_rel"] is None else f"{run_row['avg_forget_rel']:.8f}",
+            "" if run_row["emissions_kg"]   is None else f"{float(run_row['emissions_kg']):.6f}",
+            f"{float(run_row['elapsed_sec']):.3f}" if run_row["elapsed_sec"] is not None else "",
+        ]),
+        encoding="utf-8"
+    )
 
     # ▲ Limpia ganchos si el método los registró (AS/SA-SNN exponen detach()).
     if hasattr(method_obj, "detach"):

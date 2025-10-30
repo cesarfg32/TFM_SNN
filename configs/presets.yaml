@@ -92,22 +92,22 @@ defaults: &defaults
       measure_power_secs: 15
       log_level: "error"
     ewc:
-      fisher_verbose: true   # true -> imprime “after_task: estimando Fisher...” y el resumen
-      inner_verbose:  true   # true -> logs dentro del loop de entrenamiento
-      inner_every:    100      # cada cuántos steps imprimir (si inner_verbose=true)
+      fisher_verbose: false   # true -> imprime “after_task: estimando Fisher...” y el resumen
+      inner_verbose:  false   # true -> logs dentro del loop de entrenamiento
+      inner_every:    8192      # cada cuántos steps imprimir (si inner_verbose=true)
     rehearsal:
-      buffer_verbose: true       # resumen del buffer al terminar cada tarea
-      replay_verbose: true       # detalles del mix (task_bs/replay_bs/buffer_len)
+      buffer_verbose: false       # resumen del buffer al terminar cada tarea
+      replay_verbose: false       # detalles del mix (task_bs/replay_bs/buffer_len)
       replay_show_shapes: false  # añade shapes si quieres (puede ser ruidoso)
     as-snn:
-      activity_verbose: true     # trazas periódicas de actividad y penalty
-      activity_every: 200
+      activity_verbose: false     # trazas periódicas de actividad y penalty
+      activity_every: 8192
     sa-snn:
-      trace_verbose: true
+      trace_verbose: false
       trace_every: 8192
     sca-snn:
-      verbose: true       # imprime trazas periódicas
-      log_every: 50      # ajústalo según batch_size/longitud del run
+      verbose: false       # imprime trazas periódicas
+      log_every: 8192      # ajústalo según batch_size/longitud del run
   naming: &defaults_naming
     tag: ""
 
@@ -185,9 +185,11 @@ accurate:
     <<: *defaults_optim
     lr: 7.5e-4
     epochs: 20
-    batch_size: 32          # 16
-    es_patience: 5          # 25% de 20 épocas
-    es_min_delta: 7.5e-4    # sube a 1e-3 si ves ruido en val
+    batch_size: 32          # 32
+    #es_patience: 5          # 25% de 20 épocas
+    #es_min_delta: 7.5e-4    # sube a 1e-3 si ves ruido en val
+    es_patience: null
+    es_min_delta: null
   continual:
     #method: rehearsal+ewc
     #params:
