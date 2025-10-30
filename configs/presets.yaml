@@ -114,105 +114,44 @@ defaults: &defaults
 
 # ---- Presets ----
 
-fast:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 10
-  optim:
-    <<: *defaults_optim
-    epochs: 2       # 8
-    batch_size: 128 # 64
-  continual:
-    <<: *defaults_continual
-    method: sa-snn
-    params:
-      #attach_to: "f6"     # ← PilotNetSNN (f6)
-      k: 16               # ~10–20% de 100
-      tau: 10.0
-      th_min: 1.0
-      th_max: 2.0
-      p: 2000000          # 2e6
-      vt_scale: 1.0
-      flatten_spatial: false
-      assume_binary_spikes: false
-      reset_counters_each_task: false
-  prep:
-    <<: *defaults_prep
-  logging:
-    <<: *defaults_logging
+# fast
+continual:
+  method: sa-snn
+  params:
+    # attach_to: "f6"      # ← añade esto (ver punto 2)
+    k: 16
+    tau: 10.0
+    thresh_lo: 1.0
+    period: 2000000       # antes p=2e6
+    flatten_spatial: false
+    assume_binary_spikes: false
+    reset_counters_each_task: false
 
-std:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 16
-  optim:
-    <<: *defaults_optim
-    lr: 5.0e-4
-    epochs: 8
-    batch_size: 96
-    es_patience: 3          # ~37% de 8 épocas
-    es_min_delta: 5.0e-4    # umbral razonable para MAE
-  continual:
-    #<<: *defaults_continual
-    #params:
-    #  lam: 1e9          # ← optuna # sugerido: 1.5e8
-    #  fisher_batches: 1000
-    method: sa-snn
-    params:
-      attach_to: "f6"        # 1ª densa de PilotNetSNN (N=100)
-      k: 12                  # ~12% de 100
-      tau: 20                # ≈1.25×T
-      th_min: 1.0
-      th_max: 2.0
-      vt_scale: 1.25         # sesgo anti-reuso suave
-      p: 3000000             # subida de umbral lenta (no satura pronto)
-      flatten_spatial: false
-      assume_binary_spikes: false
-      reset_counters_each_task: false
-  prep:
-    <<: *defaults_prep
-  logging:
-    <<: *defaults_logging
+# std
+continual:
+  method: sa-snn
+  params:
+    attach_to: "f6"
+    k: 12
+    tau: 20
+    thresh_lo: 1.0
+    period: 3000000
+    flatten_spatial: false
+    assume_binary_spikes: false
+    reset_counters_each_task: false
 
-accurate:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 30
-  optim:
-    <<: *defaults_optim
-    lr: 7.5e-4
-    epochs: 20
-    batch_size: 32          # 32
-    #es_patience: 5          # 25% de 20 épocas
-    #es_min_delta: 7.5e-4    # sube a 1e-3 si ves ruido en val
-    es_patience: null
-    es_min_delta: null
-  continual:
-    #method: rehearsal+ewc
-    #params:
-    #  buffer_size: 3000
-    #  replay_ratio: 0.2
-    #  lam: 1.0e9
-    #  fisher_batches: 1500
-    method: sa-snn
-    params:
-      attach_to: "f6"
-      k: 8                   # ~8% (más esparso → más estabilidad)
-      tau: 30                # ≈T (puedes subir a 40 si quieres todavía más memoria temporal)
-      th_min: 1.0
-      th_max: 2.0
-      vt_scale: 1.5
-      p: 5000000
-      flatten_spatial: false
-      assume_binary_spikes: false
-      reset_counters_each_task: false
-  prep:
-    <<: *defaults_prep
-  logging:
-    <<: *defaults_logging
+# accurate
+continual:
+  method: sa-snn
+  params:
+    attach_to: "f6"
+    k: 8
+    tau: 30
+    thresh_lo: 1.0
+    period: 5000000
+    flatten_spatial: false
+    assume_binary_spikes: false
+    reset_counters_each_task: false
 
 as_snn:
   <<: *defaults
