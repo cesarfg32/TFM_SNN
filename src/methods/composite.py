@@ -24,12 +24,16 @@ class CompositeMethod(ContinualMethod):
         self.name = "+".join(m.name for m in self.methods)
 
     def penalty(self) -> torch.Tensor:
-        # No fuerces device con un tensor cero; deja que el primer término lo dicte.
-        total = None  # type: torch.Tensor | None
+        total: torch.Tensor | None = None
         for m in self.methods:
             p = m.penalty()
-            total = p if total is None else (total + p)
-        # len(methods) >= 1 ⇒ total no puede ser None
+            if total is None:
+                total = p
+            else:
+                # Alinear dispositivos para evitar mismatches CPU/GPU
+                if p.device != total.device:
+                    p = p.to(total.device)
+                total = total + p
         return total  # type: ignore[return-value]
 
     def before_task(self, model: nn.Module, train_loader, val_loader) -> None:

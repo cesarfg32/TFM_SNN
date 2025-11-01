@@ -36,17 +36,17 @@ class ReservoirBuffer:
             if j < self.buffer_size:
                 self.reservoir[j] = (x, y)
 
-    def add_from_loader(self, loader: DataLoader, cap: Optional[int] = None) -> None:
+    def add_from_loader(self, loader: DataLoader, cap: Optional[int] = None) -> int:
         """Añade muestras individuales desde un loader (máximo 'cap' muestras si se desea)."""
         added = 0
         for xb, yb in loader:
-            # xb puede ser (B, T, C, H, W) o (B, C, H, W) según encoder del dataset
             B = xb.shape[0]
             for b in range(B):
                 self.add_sample((xb[b], yb[b]))
                 added += 1
                 if cap is not None and added >= cap:
-                    return
+                    return added
+        return added
 
     def as_dataset(self) -> Dataset:
         if not self.reservoir:
@@ -127,10 +127,9 @@ class RehearsalMethod:
     def after_task(self, model, train_loader: DataLoader, val_loader: DataLoader) -> None:
         if self._last_task_loader is not None:
             before = len(self.buffer)
-            added = self.buffer.add_from_loader(self._last_task_loader)
+            added = self.buffer.add_from_loader(self._last_task_loader)  # ← ahora es int
             now = len(self.buffer)
             self._last_task_loader = None
-
             if getattr(self, "buffer_verbose", False):
                 cap = self.buffer.buffer_size
                 print(f"[Rehearsal] buffer += {added} (total={now}/{cap}) | seen={self.buffer.num_seen}")

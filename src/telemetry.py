@@ -1,7 +1,6 @@
 # src/telemetry.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 import csv
 import json
 import os
@@ -18,7 +17,6 @@ try:
 except Exception:
     EmissionsTracker = None  # fallback sin dependencia
 
-
 # -----------------------------
 # Utilidades de logging simple
 # -----------------------------
@@ -27,12 +25,10 @@ def _write_jsonl(path: Path, payload: Dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-
 def log_telemetry_event(out_dir: Path | str, payload: Dict[str, Any]) -> None:
     out_dir = Path(out_dir)
     payload = dict({"ts": time.time()}, **payload)
     _write_jsonl(out_dir / "telemetry.jsonl", payload)
-
 
 def system_snapshot() -> Dict[str, Any]:
     snap: Dict[str, Any] = {
@@ -60,7 +56,6 @@ def system_snapshot() -> Dict[str, Any]:
     except Exception:
         pass
     return snap
-
 
 # ----------------------------------------------------
 # Context manager de CodeCarbon (o no-op si no existe)
@@ -151,9 +146,7 @@ def carbon_tracker_ctx(
                 setattr(tracker, "final_emissions", final)
             except Exception:
                 pass
-
     return _ctx()
-
 
 # ----------------------------------------------------
 # Lectura de emisiones desde emissions.csv (CodeCarbon)
@@ -184,4 +177,3 @@ def read_emissions_kg(out_dir: Path | str) -> Optional[float]:
         return last_val
     except Exception:
         return None
-

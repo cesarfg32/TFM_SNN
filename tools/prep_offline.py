@@ -1,4 +1,3 @@
-# tools/prep_offline.py
 from __future__ import annotations
 import argparse, json
 from pathlib import Path
@@ -12,7 +11,6 @@ from src.utils import load_preset
 from src.prep.data_prep import PrepConfig, run_prep   # tu módulo existente
 from src.prep.augment_offline import balance_train_with_augmented_images
 from src.prep.encode_offline import encode_csv_to_h5
-
 
 def main():
     ap = argparse.ArgumentParser(
@@ -37,9 +35,10 @@ def main():
     if prep.get("runs"):
         runs = list(prep["runs"])
     else:
+        # Acepta circuitos que tengan driving_log.csv en cualquier subnivel
         runs = sorted([
             d.name for d in RAW.iterdir()
-            if d.is_dir() and (d / "driving_log.csv").exists()
+            if d.is_dir() and any(p.name == "driving_log.csv" for p in d.rglob("driving_log.csv"))
         ])
 
     pcfg = PrepConfig(
@@ -54,6 +53,7 @@ def main():
         # LEGACY desactivado: no duplicamos filas aquí
         target_per_bin=None,
         cap_per_bin=None,
+        merge_subruns=bool(prep.get("merge_subruns", True)),
     )
     manifest = run_prep(pcfg)  # ← genera canonical + train/val/test + tasks.json
     tasks_json_path = PROC / prep.get("tasks_file_name", "tasks.json")
@@ -67,6 +67,7 @@ def main():
             base_dir  = RAW / run
             out_dir   = PROC / run
             train_csv = out_dir / "train.csv"
+
             out_csv, stats = balance_train_with_augmented_images(
                 train_csv=train_csv,
                 raw_run_dir=base_dir,
@@ -146,7 +147,6 @@ def main():
                     seed=seed,
                 )
                 print("OK H5:", out)
-
 
 if __name__ == "__main__":
     main()

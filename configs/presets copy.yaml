@@ -12,19 +12,18 @@ defaults: &defaults
 
   data: &defaults_data
     # Codificación
-    encoder: rate          # rate | latency | raw | image
+    encoder: rate              # rate | latency | raw | image
     T: 10
     gain: 0.5
-    use_offline_spikes: true
-    encode_runtime: false
+    use_offline_spikes: true   # H5 offline
+    encode_runtime: false      # solo si use_offline_spikes=false
 
-    # Reproductibilidad / rendimiento (estable /dev/shm)
+    # Reproducibilidad / rendimiento
     seed: 42
-    num_workers: 6
+    num_workers: 8
     prefetch_factor: 2
     pin_memory: true
-    persistent_workers: false
-    pin_memory_device: "cuda"
+    persistent_workers: true
 
     # Aumentos (ligeros por defecto)
     aug_train: &aug_light
@@ -43,7 +42,7 @@ defaults: &defaults
 
   # División/prepare (offline)
   prep: &defaults_prep
-    runs: ["circuito1", "circuito2"]
+    runs: ["circuito1", "circuito2"]  # o [] si autodetectas
     merge_subruns: true
     use_left_right: true
     steer_shift: 0.2
@@ -51,13 +50,13 @@ defaults: &defaults
     train: 0.70
     val: 0.15
     seed: 42
-    # Balanceo offline de imágenes
+    # Balanceo offline de imágenes (si tu pipeline lo usa)
     balance_offline:
-      mode: images          # images | none
+      mode: images            # images | none
       target_per_bin: auto
       cap_per_bin: 12000
       aug:
-        prob_hflip: 0.0     # desactivar flips en offline
+        prob_hflip: 0.0       # desactivar en offline; fotométricos solo
         brightness: [0.8, 1.2]
         contrast:   [0.8, 1.2]
         saturation: [0.8, 1.2]
@@ -67,7 +66,7 @@ defaults: &defaults
     tasks_file_name: tasks.json
     tasks_balanced_file_name: tasks_balanced.json
     use_balanced_tasks: true
-    encode_h5: false
+    encode_h5: false          # se puede activar en un preset
 
   optim: &defaults_optim
     amp: true
@@ -75,18 +74,16 @@ defaults: &defaults
     epochs: 2
     es_patience: null
     es_min_delta: null
-    batch_size: 160
-    compile: false
-    compile_mode: reduce-overhead
+    batch_size: 64
 
-  # EWC por defecto salvo que se sobrescriba
+  # EWC por defecto
   continual: &defaults_continual
     method: ewc
     params:
       lam: 1.0e9
       fisher_batches: 1000
 
-  # Control de logs (mantengo como lo tenías)
+  # Control de logs por preset
   logging: &defaults_logging
     telemetry:
       codecarbon: true
@@ -125,13 +122,11 @@ fast:
   optim:
     <<: *defaults_optim
     epochs: 2
-    batch_size: 384
-    compile: true
-    compile_mode: reduce-overhead
+    batch_size: 128
   continual:
-    <<: *defaults_continual
     method: sa-snn
     params:
+      # attach_to: "f6"
       k: 16
       tau: 10.0
       th_min: 1.0
@@ -160,13 +155,12 @@ std:
     batch_size: 96
     es_patience: 3
     es_min_delta: 5.0e-4
-    compile: false
   continual:
     method: sa-snn
     params:
-      attach_to: "f6"
-      k: 12
-      tau: 20
+      attach_to: "f6"     # 1ª densa de PilotNetSNN (N=100)
+      k: 12               # ~12%
+      tau: 20             # ≈1.25×T
       th_min: 1.0
       th_max: 2.0
       vt_scale: 1.25
@@ -190,50 +184,15 @@ accurate:
     <<: *defaults_optim
     lr: 7.5e-4
     epochs: 20
-    batch_size: 160
+    batch_size: 32
     es_patience: null
     es_min_delta: null
-    compile: false
   continual:
     method: sa-snn
     params:
       attach_to: "f6"
-      k: 8
-      tau: 30
-      th_min: 1.0
-      th_max: 2.0
-      vt_scale: 1.5
-      p: 5000000
-      flatten_spatial: false
-      assume_binary_spikes: false
-      reset_counters_each_task: false
-  prep:
-    <<: *defaults_prep
-  logging:
-    <<: *defaults_logging
-  naming:
-    <<: *defaults_naming
-
-
-accurate_orignial:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 30
-  optim:
-    <<: *defaults_optim
-    lr: 7.5e-4
-    epochs: 20
-    batch_size: 160         # seguro en tu 4080 (evita /dev/shm issues)
-    es_patience: null
-    es_min_delta: null
-    compile: false          # no compilar (hooks SNN)
-  continual:
-    method: sa-snn          # se sobreescribe por experimento
-    params:
-      attach_to: "f6"
-      k: 8
-      tau: 30
+      k: 8                # ~8% (más esparso → más estabilidad)
+      tau: 30             # ≈T
       th_min: 1.0
       th_max: 2.0
       vt_scale: 1.5

@@ -2,14 +2,29 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from pathlib import Path
-import sys, json, torch, math
-from typing import Dict, Any, Tuple, List
+import sys, json, torch, math, os, time as _time, logging, platform
+from typing import Dict, Any, Tuple, List, Optional
 
+# NEW: multiprocessing tweaks para evitar /dev/shm bus errors
+import torch.multiprocessing as mp
+try:
+    mp.set_sharing_strategy("file_system")
+except Exception:
+    pass
+
+def _get_mp_ctx():
+    # En Linux/WSL suele ir mejor 'forkserver' que 'fork' con PyTorch + CUDA.
+    for name in ("forkserver", "spawn"):
+        try:
+            return mp.get_context(name)
+        except Exception:
+            continue
+    return None
+
+from torch.utils.data import DataLoader
 from src.training import TrainConfig, train_supervised, set_encode_runtime
 from src.methods.registry import build_method
 from src.eval import eval_loader
-
-# Telemetría
 from src.telemetry import (
     carbon_tracker_ctx,
     log_telemetry_event,
@@ -17,23 +32,15 @@ from src.telemetry import (
     read_emissions_kg,
 )
 from contextlib import nullcontext
-import os, time as _time, logging
 
-# NEW: para detectar versión de codecarbon y loguearla
-try:
-    from importlib.metadata import version as _pkg_version, PackageNotFoundError
-except Exception:  # safety en entornos antiguos
-    _pkg_version = None
-    class PackageNotFoundError(Exception): ...
 # ---------------------------------------------------
-
-# Asegura raíz en sys.path (igual que tenías)
+# Asegura raíz en sys.path
 ROOT = Path.cwd().parents[0] if (Path.cwd().name == "notebooks") else Path.cwd()
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 # -----------------------------
-# utilidades locales para métricas/archivos
+# utilidades locales
 # -----------------------------
 def _model_label(model, tfm) -> str:
     cls = getattr(model, "__class__", type(model)).__name__
@@ -50,20 +57,13 @@ def _safe_write(path: Path, payload) -> None:
             f.write(str(payload))
 
 def _build_eval_matrix(results: Dict[str, Dict[str, float]]) -> Tuple[List[str], List[List[float]]]:
-    """
-    Devuelve (task_names, M) donde M[i][j] = MAE de la tarea i evaluada al terminar la tarea j.
-    Diagonal M[i][i] = test_mae tras entrenar la tarea i.
-    Última columna M[i][-1] = MAE final en la tarea i tras la última tarea (útil para olvido).
-    """
     names = list(results.keys())
     n = len(names)
     mat = [[math.nan for _ in range(n)] for _ in range(n)]
     for i, ti in enumerate(names):
         mat[i][i] = float(results[ti].get("test_mae", math.nan))
         for j, tj in enumerate(names):
-            if j < i:  # no existe evaluación "futura" antes de entrenar esa tarea
-                continue
-            if j == i:
+            if j <= i:
                 continue
             key = f"after_{tj}_mae"
             if key in results[ti]:
@@ -71,11 +71,6 @@ def _build_eval_matrix(results: Dict[str, Dict[str, float]]) -> Tuple[List[str],
     return names, mat
 
 def _compute_forgetting(names: List[str], mat: List[List[float]]) -> Dict[str, Dict[str, float]]:
-    """
-    Olvido para MAE (menor es mejor):
-      F_abs(i) = M[i][last] - min_{k<=last} M[i][k]    (aumento de error respecto al mejor histórico)
-      F_rel(i) = F_abs(i) / min_{k<=last} M[i][k]
-    """
     n = len(names)
     out: Dict[str, Dict[str, float]] = {}
     for i in range(n):
@@ -101,41 +96,85 @@ def _torch_cuda_mem_peak_mb() -> float | None:
 def _torch_num_params(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
-# ==== NUEVO: helpers para curvas y nombre de c2 ====
+# --- CSV history: ahora incluye columnas extra si existen ---
 def _to_csv_lines_from_history(history: dict) -> str:
-    """Convierte history={'train_loss':[...], 'val_loss':[...]} a CSV 'epoch,train_loss,val_loss'."""
-    L = max(len(history.get("train_loss", [])), len(history.get("val_loss", [])))
-    lines = ["epoch,train_loss,val_loss"]
+    cols = ["epoch", "train_loss", "val_loss", "val_mae", "val_mse", "train_mae", "train_mse"]
+    L = max([
+        len(history.get("train_loss", [])),
+        len(history.get("val_loss",   [])),
+        len(history.get("val_mae",    [])),
+        len(history.get("val_mse",    [])),
+        len(history.get("train_mae",  [])),
+        len(history.get("train_mse",  [])),
+        0
+    ])
+    lines = [",".join(cols)]
     for e in range(L):
-        tr = history.get("train_loss", [None]*L)[e]
-        va = history.get("val_loss",   [None]*L)[e]
-        tr_s = "" if tr is None else f"{float(tr):.8f}"
-        va_s = "" if va is None else f"{float(va):.8f}"
-        lines.append(f"{e+1},{tr_s},{va_s}")
+        row = [str(e+1)]
+        for k in cols[1:]:
+            seq = history.get(k, [])
+            v = seq[e] if e < len(seq) else None
+            row.append("" if v is None else f"{float(v):.8f}")
+        lines.append(",".join(row))
     return "\n".join(lines)
 
 def _pick_c2_name(task_names: List[str]) -> str | None:
-    """Heurística robusta para localizar 'circuito2'/track2 en tus nombres."""
     import re
     for n in task_names:
         if re.search(r"(c2|circuito2|track2|tarea2|task2)", n, re.I):
             return n
     return task_names[1] if len(task_names) >= 2 else (task_names[-1] if task_names else None)
-# ================================================
 
+# -----------------------------
+# NUEVO: clonar loader con num_workers=0 para anclas (SCA)
+# -----------------------------
+def _to_single_worker_loader(loader: DataLoader) -> DataLoader:
+    """Clona un DataLoader para uso *solo* en cálculo de anclas (SCA)."""
+    try:
+        return DataLoader(
+            loader.dataset,
+            batch_size=loader.batch_size,
+            sampler=getattr(loader, "sampler", None),
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+            persistent_workers=False,
+            prefetch_factor=1,
+            drop_last=False,
+            collate_fn=loader.collate_fn,
+            timeout=0,
+        )
+    except Exception:
+        return loader
+
+# -----------------------------
+# NUEVO: manifest por tarea (para plots robustos)
+# -----------------------------
+def _write_task_manifest(task_dir: Path, meta: Dict[str, Any], history: Dict[str, Any]) -> None:
+    payload = {
+        "meta": meta,
+        "history": {
+            "train_loss": history.get("train_loss", []),
+            "val_loss":   history.get("val_loss",   []),
+            "val_mae":    history.get("val_mae",    []),
+            "val_mse":    history.get("val_mse",    []),
+            "train_mae":  history.get("train_mae",  []),
+            "train_mse":  history.get("train_mse",  []),
+        },
+    }
+    _safe_write(Path(task_dir) / "manifest.json", payload)
+
+# ================================================
 def run_continual(
     task_list: list[dict],
     make_loader_fn,
     make_model_fn,
     tfm,
-    cfg: Dict[str, Any],             # ← preset YA cargado y merged
-    preset_name: str,               # ← "fast" | "std" | "accurate" (solo para naming)
+    cfg: Dict[str, Any],
+    preset_name: str,
     out_root: Path | str | None = None,
     verbose: bool = True,
 ):
-    # -----------------------------
-    # 1) Leer config del preset
-    # -----------------------------
     data = cfg["data"]; optim = cfg["optim"]; cont = cfg["continual"]; naming = cfg.get("naming", {})
 
     encoder  = str(data["encoder"])
@@ -143,53 +182,48 @@ def run_continual(
     gain     = float(data["gain"])
     seed     = int(data.get("seed", 42))
 
+    use_offline = bool(data.get("use_offline_spikes", False))
+
     epochs   = int(optim["epochs"])
     bs       = int(optim["batch_size"])
     use_amp  = bool(optim["amp"] and torch.cuda.is_available())
     lr       = float(optim["lr"])
 
-    # -----------------------------
-    # 2) Kwargs comunes del DataLoader (coherentes con preset)
-    # -----------------------------
+    # ------------- DataLoader kwargs (mitigaciones shm) -------------
     dl_kwargs = dict(
         num_workers         = int(data["num_workers"]),
         pin_memory          = bool(data["pin_memory"]),
         persistent_workers  = bool(data["persistent_workers"]),
         prefetch_factor     = data["prefetch_factor"],
+        drop_last           = True,
+        pin_memory_device   = data.get("pin_memory_device", "cuda"),
+        timeout             = 0,
     )
-    # augment (si existe)
+    mp_ctx = _get_mp_ctx()
+    if mp_ctx is not None and dl_kwargs["num_workers"] > 0:
+        dl_kwargs["multiprocessing_context"] = mp_ctx
+
     from src.datasets import AugmentConfig
     if data.get("aug_train"):
         dl_kwargs["aug_train"] = AugmentConfig(**data["aug_train"])
-
-    # balanceo online (si se activa en el preset)
     if data.get("balance_online", False):
         dl_kwargs["balance_train"] = True
-        # Hereda de prep.bins si balance_bins es None
         bb = data.get("balance_bins", None)
         if bb is None:
             bb = int(cfg.get("prep", {}).get("bins", 21))
         dl_kwargs["balance_bins"] = int(bb)
         dl_kwargs["balance_smooth_eps"] = float(data.get("balance_smooth_eps", 1e-3))
 
-    # -----------------------------
-    # 3) Modelo y pérdidas
-    # -----------------------------
     device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_fn = torch.nn.MSELoss()
     model   = make_model_fn(tfm)
     model_lbl = _model_label(model, tfm)
 
-    # -----------------------------
-    # 4) Construir el método continual (inyecta T si procede)
-    # -----------------------------
     method = cont["method"].lower()
     method_kwargs = dict(cont.get("params", {}))
-    method_kwargs.setdefault("T", T)  # útil para SA-SNN
-
+    method_kwargs.setdefault("T", T)
     method_obj = build_method(method, model, loss_fn=loss_fn, device=device, **method_kwargs)
 
-    # === Logging por preset: logging.<método> ===
     log_root = (cfg.get("logging", {}) or {})
     def _apply_log_section(obj, key: str):
         sect = log_root.get(key, {}) or {}
@@ -198,10 +232,7 @@ def run_continual(
                 setattr(obj, k, v)
             except Exception:
                 pass
-
-    # aplica al método principal
     _apply_log_section(method_obj, method.lower())
-    # si es composite y expone submétodos, intenta aplicar por nombre base de cada uno
     if hasattr(method_obj, "methods"):
         try:
             for sub in getattr(method_obj, "methods", []):
@@ -222,30 +253,22 @@ def run_continual(
     out_dir = (Path(out_root) if out_root else Path("outputs")) / out_tag
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # -----------------------------
-    # Telemetría (activada por preset: logging.telemetry)
-    # -----------------------------
+    # -------- Telemetría --------
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError
     tele_cfg   = (cfg.get("logging", {}) or {}).get("telemetry", {}) or {}
     use_cc     = bool(tele_cfg.get("codecarbon", False))
     cc_offline = bool(tele_cfg.get("offline", True))
     cc_country = tele_cfg.get("country_iso_code") or os.getenv("CODECARBON_COUNTRY_ISO_CODE", None)
     cc_period  = int(tele_cfg.get("measure_power_secs", 15))
     cc_loglvl  = str(tele_cfg.get("log_level", "warning")).lower()
-
     try:
         logging.getLogger("codecarbon").setLevel(getattr(logging, cc_loglvl.upper(), logging.WARNING))
     except Exception:
         pass
-
-    # NEW (1/2): log de configuración efectiva de CodeCarbon, incluida la versión instalada
-    cc_ver = None
-    if _pkg_version is not None:
-        try:
-            cc_ver = _pkg_version("codecarbon")
-        except PackageNotFoundError:
-            cc_ver = None
-        except Exception:
-            cc_ver = None
+    try:
+        cc_ver = _pkg_version("codecarbon")
+    except Exception:
+        cc_ver = None
 
     log_telemetry_event(out_dir, {
         "event": "run_start",
@@ -256,7 +279,6 @@ def run_continual(
         "params_total": _torch_num_params(model),
         "lr": lr, "epochs": epochs,
     })
-
     log_telemetry_event(out_dir, {
         "event": "cc_config",
         "codecarbon_enabled": use_cc,
@@ -266,8 +288,6 @@ def run_continual(
         "cc_period": cc_period,
         "cc_loglvl": cc_loglvl,
     })
-    # ---------------------------------------------------
-
     t_start = _time.time()
     cc_context = carbon_tracker_ctx(
         out_dir,
@@ -278,25 +298,15 @@ def run_continual(
         log_level=cc_loglvl,
     ) if use_cc else nullcontext()
 
-    # -----------------------------
-    # Estructuras para reportes
-    # -----------------------------
     results: Dict[str, Dict[str, float]] = {}
     seen: List[Tuple[str, Any]] = []
-    perf_rows: List[Dict[str, Any]] = []  # tiempos/mem por tarea
-
-    # NEW (2/2): capturar el tracker y emissions explícitamente tras el with
+    perf_rows: List[Dict[str, Any]] = []
     tracker_ref = None
     emissions_kg = None
-    # ---------------------------------------------------
 
     with cc_context as _cc:
-        # Mantén una referencia al tracker para leer final_emissions tras el with
         tracker_ref = _cc
 
-        # -----------------------------
-        # 5) Entrenamiento por tareas
-        # -----------------------------
         es_pat = optim.get("es_patience", None)
         es_md  = optim.get("es_min_delta", None)
         es_pat = int(es_pat) if es_pat is not None else None
@@ -320,81 +330,112 @@ def run_continual(
                     f"| B={bs} T={T} AMP={use_amp} | enc={encoder} ---"
                 )
 
-            # DataLoaders (H5 ó CSV+runtime encode, según factory)
             tr, va, te = make_loader_fn(
                 task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
             )
 
-            # Si el loader entrega 4D (C,H,W), activar runtime encode en GPU
+            # Muestra para decidir encode runtime (solo si NO hay offline spikes)
             xb_sample, _ = next(iter(tr))
             used_rt = False
-            if xb_sample.ndim == 4:
+            if (not use_offline) and xb_sample.ndim == 4:
                 set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
                 used_rt = True
                 if verbose: print("  runtime encode: ON (GPU)")
 
-            # Si el método (o composite) propone envolver el loader (p.ej. Rehearsal), respétalo
+            # --- SOLO SCA: loader "anclas" con num_workers=0 para evitar /dev/shm ---
+            is_sca = "sca-snn" in method_obj.name.lower() or "sca_snn" in method_obj.name.lower()
+            tr_anchor = _to_single_worker_loader(tr) if is_sca else tr
+
             if hasattr(method_obj, "prepare_train_loader"):
                 tr = method_obj.prepare_train_loader(tr)
 
-            # Hooks del método antes/después de cada tarea
-            method_obj.before_task(model, tr, va)
+            # --- NUEVO: evento de inicio de tarea (telemetría ligera)
+            log_telemetry_event(out_dir, {"event": "task_start", "task_idx": i, "task_name": name})
 
-            # Métricas de eficiencia por tarea
+            # Antes de la tarea con loader anclas "single-worker" SOLO si SCA
+            method_obj.before_task(model, tr_anchor, va)
+
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
             t0 = _time.time()
 
-            # === ENTRENAR Y CAPTURAR CURVAS ===
-            history = train_supervised(
-                model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
-            )
+            try:
+                history = train_supervised(
+                    model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
+                )
+            except (OSError, RuntimeError) as e:
+                msg = str(e).lower()
+                # Fallback solo si detectamos 'bus error' típico de /dev/shm en WSL
+                if "bus error" in msg or "unexpected bus error" in msg:
+                    print("[WARN] Bus error en DataLoader durante training. Reintento con num_workers=0…")
+                    tr_safe = _to_single_worker_loader(tr)
+                    history = train_supervised(
+                        model, tr_safe, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
+                    )
+                else:
+                    raise
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t1 = _time.time()
             mem_peak = _torch_cuda_mem_peak_mb()
 
-            # NEW: persistir curva por época (CSV legible)
+            # CSV de curvas (historia por epoch)
             try:
                 csv_curve = _to_csv_lines_from_history(history or {})
                 (out_dir / f"task_{i}_{name}" / "loss_curves.csv").write_text(csv_curve, encoding="utf-8")
             except Exception:
                 pass
 
-            n_epochs_done = len((history or {}).get("val_loss", []))
+            # Manifest por tarea (meta + history) para plots robustos
+            try:
+                meta = {
+                    "task_idx": i,
+                    "task_name": name,
+                    "preset": preset_name,
+                    "method": method_obj.name,
+                    "encoder": encoder,
+                    "T": T,
+                    "gain": gain,
+                    "batch_size": bs,
+                    "epochs": epochs,
+                    "lr": lr,
+                    "amp": use_amp,
+                    "seed": seed,
+                    "model": _model_label(model, tfm),
+                }
+                _write_task_manifest(out_dir / f"task_{i}_{name}", meta, history or {})
+            except Exception:
+                pass
 
+            n_epochs_done = len((history or {}).get("val_loss", []))
             perf_rows.append({
                 "task_idx": i, "task_name": name,
                 "train_time_sec": t1 - t0,
                 "cuda_mem_peak_mb": mem_peak,
                 "batch_size": bs, "amp": use_amp, "encoder": encoder, "T": T,
-                "epochs_done": n_epochs_done,  # NEW
+                "epochs_done": n_epochs_done,
             })
 
-            # Evita calcular Fisher en la última tarea: ahorra MUCHO tiempo
+            # Después de la tarea: idem (solo SCA)
             if i < len(task_list) and hasattr(method_obj, "after_task"):
-                method_obj.after_task(model, tr, va)
+                method_obj.after_task(model, tr_anchor, va)
 
-            # Eval en test de la tarea actual
             te_mae, te_mse = eval_loader(te, model, device)
             results[name] = {"test_mae": te_mae, "test_mse": te_mse}
             seen.append((name, te))
-
-            # Eval de olvido: re-evalúa test loaders de tareas previas
             for pname, p_loader in seen[:-1]:
                 p_mae, p_mse = eval_loader(p_loader, model, device)
                 results[pname][f"after_{name}_mae"] = p_mae
                 results[pname][f"after_{name}_mse"] = p_mse
 
-            # Guardar estado opcional del método (si lo expone) para trazabilidad
             try:
                 snap = None
                 if hasattr(method_obj, "get_state"):
-                    snap = method_obj.get_state()  # SA-SNN
+                    snap = method_obj.get_state()
                 elif hasattr(method_obj, "get_activity_state"):
-                    snap = method_obj.get_activity_state()  # AS-SNN
+                    snap = method_obj.get_activity_state()
                 if snap is not None:
                     _safe_write(out_dir / f"method_state_task_{i}_{name}.json", snap)
             except Exception:
@@ -404,24 +445,17 @@ def run_continual(
                 set_encode_runtime(None)
                 if verbose: print("  runtime encode: OFF")
 
-        # Asegura flush de kernels antes de cerrar el tracker
+            # --- NUEVO: evento de fin de tarea (telemetría ligera)
+            log_telemetry_event(out_dir, {"event": "task_end", "task_idx": i, "task_name": name})
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-    # -----------------------------
-    # Persistencia: resultados + matrices + eficiencia
-    # -----------------------------
-    # 1) resultados crudos por tarea
     _safe_write(out_dir / "continual_results.json", results)
 
-    # 2) matriz de evaluación (MAE) y olvido (abs/rel) —> CSV + JSON
     names, mat = _build_eval_matrix(results)
-    eval_mat = {
-        "tasks": names,
-        "mae_matrix": mat,  # fila i: tarea i; col j: MAE tras tarea j
-    }
+    eval_mat = {"tasks": names, "mae_matrix": mat}
     _safe_write(out_dir / "eval_matrix.json", eval_mat)
-    # CSV legible
     csv_lines = []
     header = ["task"] + [f"after_{n}" for n in names]
     csv_lines.append(",".join(header))
@@ -430,26 +464,21 @@ def run_continual(
         csv_lines.append(",".join(row))
     (out_dir / "eval_matrix.csv").write_text("\n".join(csv_lines), encoding="utf-8")
 
-    # Olvido por tarea
     forgetting = _compute_forgetting(names, mat)
     _safe_write(out_dir / "forgetting.json", forgetting)
 
-    # 3) tiempos/mem por tarea
-    _safe_write(out_dir / "per_task_perf.json", perf_rows)
+    # NUEVO: volcar rendimiento por tarea (json + csv)
+    if len(perf_rows) > 0:
+        _safe_write(out_dir / "per_task_perf.json", perf_rows)
+        # CSV
+        perf_csv_h = ["task_idx","task_name","train_time_sec","cuda_mem_peak_mb","batch_size","amp","encoder","T","epochs_done"]
+        lines = [",".join(perf_csv_h)]
+        for r in perf_rows:
+            lines.append(",".join([str(r.get(k,"")) for k in perf_csv_h]))
+        (out_dir / "per_task_perf.csv").write_text("\n".join(lines), encoding="utf-8")
 
-    # 4) resumen de eficiencia del run
     elapsed = _time.time() - t_start
-
-    # NEW (2/2): recoge final_emissions del tracker si no lo tienes aún
-    if emissions_kg is None and tracker_ref is not None:
-        try:
-            emissions_kg = getattr(tracker_ref, "final_emissions", None)
-        except Exception:
-            emissions_kg = None
-
-    # intenta leer emissions.csv por robustez (versiones CC antiguas / fallos de stop())
-    if emissions_kg is None:
-        emissions_kg = read_emissions_kg(out_dir)
+    emissions_kg = read_emissions_kg(out_dir) if emissions_kg is None else emissions_kg
 
     summary = {
         "elapsed_sec": elapsed,
@@ -462,17 +491,15 @@ def run_continual(
         "batch_size": bs,
         "amp": use_amp,
         "seed": seed,
-        "model": model_lbl,
+        "model": _model_label(model, tfm),
     }
     _safe_write(out_dir / "efficiency_summary.json", summary)
 
-    # NEW: guardar los parámetros efectivos del método (para documentar barridos)
     try:
         _safe_write(out_dir / "method_params.json", method_kwargs)
     except Exception:
         pass
 
-    # NEW: fila resumen para tablas rápidas (CSV + JSON)
     c2_name = _pick_c2_name(names) or (names[-1] if names else None)
     c2_final_mae = None
     if c2_name is not None:
@@ -495,7 +522,7 @@ def run_continual(
         "preset": preset_name,
         "method": method_obj.name,
         "encoder": encoder,
-        "model": model_lbl,
+        "model": _model_label(model, tfm),
         "seed": seed,
         "c2_final_mae": c2_final_mae,
         "avg_forget_rel": avg_forget_rel,
@@ -520,17 +547,11 @@ def run_continual(
         encoding="utf-8"
     )
 
-    # ▲ Limpia ganchos si el método los registró (AS/SA-SNN exponen detach()).
     if hasattr(method_obj, "detach"):
         try:
             method_obj.detach()
         except Exception:
             pass
 
-    log_telemetry_event(out_dir, {
-        "event": "run_end",
-        "elapsed_sec": elapsed,
-        "emissions_kg": emissions_kg,
-    })
-
+    log_telemetry_event(out_dir, {"event": "run_end", "elapsed_sec": elapsed, "emissions_kg": emissions_kg})
     return out_dir, results

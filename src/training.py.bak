@@ -14,14 +14,6 @@ from tqdm import tqdm
 
 from .utils import set_seeds  # reproducibilidad global
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-# Para resultados finales reproducibles mejor dejarlo en False;
-# si quieres exprimir velocidad durante HPO, puedes poner True:
-# torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.benchmark = True
-
-
 # ---------------------------------------------------------------------
 # Runtime encode: permite que el DataLoader entregue 4D (B,C,H,W)
 # y aquí hacemos la codificación temporal en GPU (T,B,C,H,W).
@@ -60,56 +52,6 @@ def _align_target_shape(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return y
 
 
-# ------------------------- Runtime encoding --------------------------
-@torch.no_grad()
-def _maybe_runtime_encode(x4: torch.Tensor) -> torch.Tensor | None:
-    """
-    Si _RUNTIME_ENC['mode'] está activo y x es 4D (B,C,H,W), devuelve un tensor 5D (T,B,C,H,W)
-    codificado en el device actual. Si no aplica, devuelve None.
-    """
-    enc = _RUNTIME_ENC
-    mode, T, gain = enc.get("mode"), enc.get("T"), enc.get("gain")
-    if mode is None or T is None or x4.ndim != 4:
-        return None
-
-    dev = x4.device
-    # Normaliza a [0,1] de forma robusta sin coste extra significativo
-    if x4.dtype == torch.uint8:
-        x = x4.to(torch.float32, device=dev) / 255.0
-    else:
-        x = x4.to(torch.float32, device=dev)
-        # Si parece estar en 0..255 en float, escala; si no, sólo clamp
-        x_max = float(torch.nan_to_num(x.detach().max(), nan=0.0).item()) if x.numel() > 0 else 1.0
-        if x_max > 1.5:
-            x = x / 255.0
-        x = x.clamp_(0.0, 1.0)
-
-    if mode.lower() == "raw":
-        # Repite la imagen 'T' veces: (B,C,H,W) -> (T,B,C,H,W)
-        return x.unsqueeze(0).repeat(T, 1, 1, 1, 1).contiguous()
-
-    if mode.lower() == "rate":
-        p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
-        # rand de forma vectorizada: (T,B,C,H,W)
-        r = torch.rand((T, *x.shape), device=dev)
-        spikes = (r < p.unsqueeze(0)).to(torch.float32)
-        return spikes.contiguous()
-
-    if mode.lower() == "latency":
-        # Un único spike cuya latencia decrece con la intensidad
-        p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
-        t_fire = torch.round((1.0 - p) * float(max(T - 1, 0))).to(torch.long)  # (B,C,H,W)
-        N = t_fire.numel()
-        spikes = torch.zeros((T, N), device=dev, dtype=torch.float32)
-        ones = torch.ones((1, N), device=dev, dtype=torch.float32)
-        spikes.scatter_(0, t_fire.view(1, -1), ones)  # coloca 1 en el instante t_fire por píxel
-        spikes = spikes.view(T, *x.shape).contiguous()
-        return spikes
-
-    # Modo no reconocido -> no hacer nada
-    return None
-
-
 def _forward_with_cached_orientation(
     model: nn.Module,
     x: torch.Tensor,
@@ -122,7 +64,6 @@ def _forward_with_cached_orientation(
     """
     Estandariza entrada y hace un forward eficiente:
     - Mueve x,y a device
-    - Si x es 4D y runtime encode está activo -> (T,B,C,H,W)
     - Si x es 5D, detecta orientación B,T,... vs T,B,... una sola vez por fase ('train'/'val')
       y cachea el resultado en phase_hint[phase] = {"ok" | "permute"}
     Devuelve y_hat.
@@ -131,13 +72,6 @@ def _forward_with_cached_orientation(
     x = x.to(device, non_blocking=True)
     y = y.to(device, non_blocking=True)
 
-    # 4D -> 5D (runtime)
-    if x.ndim == 4 and _RUNTIME_ENC.get("mode") is not None:
-        x_rt = _maybe_runtime_encode(x)
-        if x_rt is not None:
-            x = x_rt  # (T,B,C,H,W)
-
-    # 2D/3D/4D sin runtime: forward directo
     if x.ndim != 5:
         with autocast("cuda", enabled=use_amp):
             return model(x)
@@ -220,7 +154,7 @@ def train_supervised(
     t0 = time.time()
 
     best_val = float("inf")
-    patience_left = cfg.es_patience if (cfg.es_patience is not None and cfg.es_patience > 0) else None
+    patience_left = cfg.es_patience if (cfg.epochs and cfg.es_patience is not None and cfg.es_patience > 0) else None
     best_state = None
 
     # Logging de it/s opcional vía env (no requiere parche externo)
@@ -247,7 +181,7 @@ def train_supervised(
 
             opt.zero_grad(set_to_none=True)
 
-            # Forward con detección de orientación cacheada + runtime encode si procede
+            # Forward con detección de orientación cacheada
             y_hat = _forward_with_cached_orientation(
                 model=model,
                 x=x,
@@ -342,16 +276,19 @@ def train_supervised(
                     phase="val",
                 )
                 y_aligned = _align_target_shape(y_hat, y).to(device=y_hat.device, dtype=y_hat.dtype, non_blocking=True)
+
                 # MSE por batch (como antes)
                 with autocast("cuda", enabled=use_amp):
                     v_loss = loss_fn(y_hat, y_aligned)
                 v_running_mse += float(v_loss.detach().item())
-                # MAE por batch (coste ínfimo; en FP32 para estabilidad)
-                mae_batch = torch.abs(y_hat.to(torch.float32) - y_aligned.to(torch.float32)).mean()
+
+                # MAE por batch (coste ínfimo)
+                mae_batch = torch.abs(y_hat - y_aligned).mean()
                 v_running_mae += float(mae_batch.detach().item())
+
                 n_val_batches += 1
 
-        val_loss = v_running_mse / max(1, n_val_batches)  # MSE medio por batch
+        val_loss = v_running_mse / max(1, n_val_batches)  # MSE medio por batch (comportamiento previo)
         val_mae  = v_running_mae / max(1, n_val_batches)  # MAE medio por batch
 
         # --- guardar historia por epoch ---
@@ -363,13 +300,13 @@ def train_supervised(
         # guarda "last" cada epoch
         torch.save(model.state_dict(), last_ckpt)
 
-        # Early stopping (y "best") usa val_loss (MSE)
+        # Early stopping (y "best") sigue usando val_loss (MSE)
         if patience_left is not None:
             improved = (best_val - val_loss) > cfg.es_min_delta
             if improved:
                 best_val = val_loss
                 patience_left = cfg.es_patience
-                # guarda best en CPU para ahorrar VRAM
+                # guarda best
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 torch.save(best_state, best_ckpt)
             else:

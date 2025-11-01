@@ -211,8 +211,12 @@ class AS_SNN:
         """
         if self._penalty_value is not None:
             return self._penalty_value
+        # Si ya detectamos device en algún momento, devuelve cero en ese device
+        if getattr(self, "_device", None) is not None:
+            return torch.zeros((), dtype=torch.float32, device=self._device)  # type: ignore[arg-type]
         # fallback (CPU) si nunca pasó ningún batch por el hook
         return torch.zeros((), dtype=torch.float32)
+
 
     def before_task(
         self,
