@@ -354,26 +354,35 @@ class H5SpikesDataset(Dataset):
     """
     Lee archivos H5 con estructura:
       - Atributos: T, encoder, (gain), size_wh, to_gray
-      - Datasets:  'spikes'  (N, T, H, W)   o (N, T, C, H, W)
+      - Datasets:  'spikes'   (N, T, H, W)  o (N, T, C, H, W)
                    'steering' (N,)
     Devuelve: (x, y) con x -> (T, C, H, W) float32, y -> tensor([float32])
     """
     def __init__(self, h5_path: Path | str):
         super().__init__()
         self.h5_path = str(h5_path)
+        # NO abrimos el fichero para uso persistente en el padre
+        # Solo leemos N una vez y cerramos inmediatamente (seguro para el fork)
+        with h5py.File(self.h5_path, "r", libver="latest", swmr=True) as f:
+            ds = f["spikes"]
+            self._N = int(ds.shape[0])
+
+        # Handles perezosos (solo en el worker)
         self._h5 = None
         self._spikes = None
         self._steer = None
 
     def _ensure_open(self):
         if self._h5 is None:
-            self._h5 = h5py.File(self.h5_path, "r")
+            # Abrir por worker (cada proceso tendrá su propio handle)
+            # Bloqueo desactivado para evitar problemas en WSL2
+            self._h5 = h5py.File(self.h5_path, "r", libver="latest", swmr=True)
             self._spikes = self._h5["spikes"]
             self._steer  = self._h5["steering"]
 
     def __len__(self):
-        self._ensure_open()
-        return self._spikes.shape[0]
+        # No abre el fichero; solo devuelve el tamaño ya leído
+        return self._N
 
     def __getitem__(self, i: int):
         self._ensure_open()
@@ -388,9 +397,23 @@ class H5SpikesDataset(Dataset):
         y_t = torch.tensor([y], dtype=torch.float32)
         return x_t, y_t
 
+    def __getstate__(self):
+        # Evita heredar handles HDF5 al fork
+        d = self.__dict__.copy()
+        d["_h5"] = None
+        d["_spikes"] = None
+        d["_steer"] = None
+        return d
+
     def close(self):
         try:
             if self._h5 is not None:
                 self._h5.close()
         except Exception:
             pass
+        self._h5 = None
+        self._spikes = None
+        self._steer = None
+
+    def __del__(self):
+        self.close()

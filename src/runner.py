@@ -1,11 +1,15 @@
-# src/runner.py
-# -*- coding: utf-8 -*-
+# --- en runner.py, al principio del fichero ---
 from __future__ import annotations
 from pathlib import Path
 import sys, json, torch, math, os, time as _time, logging, platform
 from typing import Dict, Any, Tuple, List, Optional
 
-# NEW: multiprocessing tweaks para evitar /dev/shm bus errors
+# Entorno seguro para WSL/HDF5
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+# (Opcional pero útil para fragmentación)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:64")
+
+# Multiprocessing/Sharing: evita /dev/shm
 import torch.multiprocessing as mp
 try:
     mp.set_sharing_strategy("file_system")
@@ -184,10 +188,10 @@ def run_continual(
 
     use_offline = bool(data.get("use_offline_spikes", False))
 
-    epochs   = int(optim["epochs"])
-    bs       = int(optim["batch_size"])
-    use_amp  = bool(optim["amp"] and torch.cuda.is_available())
-    lr       = float(optim["lr"])
+    epochs  = int(optim["epochs"])
+    bs      = int(optim["batch_size"])
+    use_amp = bool(optim["amp"] and torch.cuda.is_available())
+    lr      = float(optim["lr"])
 
     # ------------- DataLoader kwargs (mitigaciones shm) -------------
     dl_kwargs = dict(
@@ -360,21 +364,34 @@ def run_continual(
                 torch.cuda.synchronize()
             t0 = _time.time()
 
+            # ============
+            # CAMBIO CLAVE: fallback robusto de DataLoader/WSL
+            # ============
             try:
                 history = train_supervised(
                     model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
                 )
-            except (OSError, RuntimeError) as e:
-                msg = str(e).lower()
-                # Fallback solo si detectamos 'bus error' típico de /dev/shm en WSL
-                if "bus error" in msg or "unexpected bus error" in msg:
-                    print("[WARN] Bus error en DataLoader durante training. Reintento con num_workers=0…")
+            except Exception as e:
+                # Detectar variantes típicas en WSL (/dev/shm, workers, multiprocesado…)
+                msg = f"{type(e).__name__}: {e}".lower()
+                triggers = (
+                    "bus error",
+                    "unexpected bus error",
+                    "shared memory",
+                    "shm",
+                    "dataloader worker",
+                    "worker exited",
+                    "multiprocessing",
+                )
+                if any(t in msg for t in triggers):
+                    print("[WARN] DataLoader/WSL issue detectado. Reintento con num_workers=0…")
                     tr_safe = _to_single_worker_loader(tr)
                     history = train_supervised(
                         model, tr_safe, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
                     )
                 else:
                     raise
+            # ============
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -452,7 +469,6 @@ def run_continual(
             torch.cuda.synchronize()
 
     _safe_write(out_dir / "continual_results.json", results)
-
     names, mat = _build_eval_matrix(results)
     eval_mat = {"tasks": names, "mae_matrix": mat}
     _safe_write(out_dir / "eval_matrix.json", eval_mat)

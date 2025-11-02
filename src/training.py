@@ -73,29 +73,30 @@ def _maybe_runtime_encode(x4: torch.Tensor) -> torch.Tensor | None:
         return None
 
     dev = x4.device
-    # Normaliza a [0,1] de forma robusta sin coste extra significativo
+
+    # Normaliza a [0,1] con el orden correcto de argumentos en .to(...)
     if x4.dtype == torch.uint8:
-        x = x4.to(torch.float32, device=dev) / 255.0
+        x = x4.to(device=dev, dtype=torch.float32) / 255.0
     else:
-        x = x4.to(torch.float32, device=dev)
+        x = x4.to(device=dev, dtype=torch.float32)
         # Si parece estar en 0..255 en float, escala; si no, sólo clamp
         x_max = float(torch.nan_to_num(x.detach().max(), nan=0.0).item()) if x.numel() > 0 else 1.0
         if x_max > 1.5:
             x = x / 255.0
         x = x.clamp_(0.0, 1.0)
 
-    if mode.lower() == "raw":
+    m = str(mode).lower()
+    if m == "raw":
         # Repite la imagen 'T' veces: (B,C,H,W) -> (T,B,C,H,W)
         return x.unsqueeze(0).repeat(T, 1, 1, 1, 1).contiguous()
 
-    if mode.lower() == "rate":
+    if m == "rate":
         p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
-        # rand de forma vectorizada: (T,B,C,H,W)
         r = torch.rand((T, *x.shape), device=dev)
         spikes = (r < p.unsqueeze(0)).to(torch.float32)
         return spikes.contiguous()
 
-    if mode.lower() == "latency":
+    if m == "latency":
         # Un único spike cuya latencia decrece con la intensidad
         p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
         t_fire = torch.round((1.0 - p) * float(max(T - 1, 0))).to(torch.long)  # (B,C,H,W)
@@ -119,56 +120,68 @@ def _forward_with_cached_orientation(
     phase_hint: Dict[str, str],
     phase: str,
 ) -> torch.Tensor:
+    """Estandariza entrada y hace un forward robusto:
+    - Mueve x,y a device.
+    - Si x es 4D y runtime encode está activo -> (T,B,C,H,W).
+    - Los modelos esperan SIEMPRE (T,B,C,H,W).
+    - Decide la orientación por shapes y cachea por fase.
+    - Autocorrige una vez si la salida no tiene dim0 == B.
     """
-    Estandariza entrada y hace un forward eficiente:
-    - Mueve x,y a device
-    - Si x es 4D y runtime encode está activo -> (T,B,C,H,W)
-    - Si x es 5D, detecta orientación B,T,... vs T,B,... una sola vez por fase ('train'/'val')
-      y cachea el resultado en phase_hint[phase] = {"ok" | "permute"}
-    Devuelve y_hat.
-    """
-    # mover tensores al device
+    # mover a device
     x = x.to(device, non_blocking=True)
     y = y.to(device, non_blocking=True)
 
-    # 4D -> 5D (runtime)
+    # 4D -> 5D (runtime) si procede
     if x.ndim == 4 and _RUNTIME_ENC.get("mode") is not None:
         x_rt = _maybe_runtime_encode(x)
         if x_rt is not None:
             x = x_rt  # (T,B,C,H,W)
 
-    # 2D/3D/4D sin runtime: forward directo
+    # Si no es secuencia, forward directo
     if x.ndim != 5:
         with autocast("cuda", enabled=use_amp):
             return model(x)
 
-    hint = phase_hint.get(phase, None)
+    B = int(y.shape[0])  # batch esperado en dim 1 (modelo espera (T,B,...))
 
+    # Decisión por shapes: objetivo (T,B,...)
+    hint = phase_hint.get(phase)
     if hint is None:
-        # Intento A: sin permutar
-        with autocast("cuda", enabled=use_amp):
-            y_hat_A = model(x)
-        if y_hat_A.shape[0] == y.shape[0]:
-            phase_hint[phase] = "ok"
-            return y_hat_A
-        # Intento B: permutar (1,0,2,3,4)
-        x_perm = x.permute(1, 0, 2, 3, 4).contiguous()
-        with autocast("cuda", enabled=use_amp):
-            y_hat_B = model(x_perm)
-        if y_hat_B.shape[0] == y.shape[0]:
-            phase_hint[phase] = "permute"
-            return y_hat_B
-        # Si nada encaja (caso raro), deja "ok"
-        phase_hint[phase] = "ok"
-        return y_hat_A
+        if x.shape[1] == B:
+            hint = "ok"        # ya está (T,B,...)
+        elif x.shape[0] == B:
+            hint = "permute"   # viene (B,T,...) -> permutar
+        else:
+            hint = "ok"        # por defecto
+        phase_hint[phase] = hint
 
-    if hint == "ok":
-        with autocast("cuda", enabled=use_amp):
-            return model(x)
-    else:
-        x_perm = x.permute(1, 0, 2, 3, 4).contiguous()
-        with autocast("cuda", enabled=use_amp):
-            return model(x_perm)
+    x_fwd = x.permute(1, 0, 2, 3, 4).contiguous() if hint == "permute" else x
+
+    with autocast("cuda", enabled=use_amp):
+        y_hat = model(x_fwd)
+
+    # Autocorrección si dim0 != B
+    if isinstance(y_hat, torch.Tensor) and y_hat.ndim >= 1 and y_hat.shape[0] != B:
+        if hint == "ok":
+            # probar permutando
+            x_alt = x.permute(1, 0, 2, 3, 4).contiguous()
+            with torch.no_grad(), autocast("cuda", enabled=use_amp):
+                y_try = model(x_alt)
+            if isinstance(y_try, torch.Tensor) and y_try.ndim >= 1 and y_try.shape[0] == B:
+                phase_hint[phase] = "permute"
+                with autocast("cuda", enabled=use_amp):
+                    y_hat = model(x_alt)
+        else:
+            # veníamos permutando; probar sin permutar
+            with torch.no_grad(), autocast("cuda", enabled=use_amp):
+                y_try = model(x)
+            if isinstance(y_try, torch.Tensor) and y_try.ndim >= 1 and y_try.shape[0] == B:
+                phase_hint[phase] = "ok"
+                with autocast("cuda", enabled=use_amp):
+                    y_hat = model(x)
+
+    return y_hat
+
 
 
 # ---------------------------------------------------------------------

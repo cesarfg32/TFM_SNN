@@ -95,8 +95,8 @@ defaults: &defaults
       measure_power_secs: 15
       log_level: "error"
     ewc:
-      fisher_verbose: false
-      inner_verbose:  false
+      fisher_verbose: true
+      inner_verbose:  true
       inner_every:    8192
     rehearsal:
       buffer_verbose: false

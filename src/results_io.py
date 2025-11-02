@@ -1,3 +1,4 @@
+# src/results_io.py
 # -*- coding: utf-8 -*-
 """
 results_io.py
@@ -206,7 +207,7 @@ def _row_best_final_forgetting(row: List[float]) -> Tuple[float, float, float, f
         return (math.nan, math.nan, math.nan, math.nan)
     best = min(vals)
     final = row[-1]
-    if final is None or math.isnan(final) or best is None or math.isnan(best):
+    if final is None or (isinstance(final, float) and math.isnan(final)) or best is None or (isinstance(best, float) and math.isnan(best)):
         return (best, final, math.nan, math.nan)
     f_abs = final - best
     f_rel = (f_abs / best) if best > 0 else math.nan
@@ -265,6 +266,72 @@ def _read_first_task_manifest(run_dir: Path) -> dict:
                 }
     return {}
 
+# ==================================
+# Fallback per_task_perf (SCA & otros)
+# ==================================
+def _read_per_task_perf(run_dir: Path) -> Dict[str, float]:
+    """
+    Devuelve dict {task_name -> final_mae_aproximado} a partir de:
+      - per_task_perf.json (preferente) o
+      - per_task_perf.csv (fallback)
+    Prueba claves: test_mae, final_mae, val_mae, best_val_mae
+    """
+    run_dir = Path(run_dir)
+    out: Dict[str, float] = {}
+
+    pj = run_dir / "per_task_perf.json"
+    if pj.exists():
+        try:
+            P = json.loads(pj.read_text(encoding="utf-8"))
+            if isinstance(P, list):
+                items = P
+            elif isinstance(P, dict) and "rows" in P:
+                items = P["rows"]
+            else:
+                items = []
+            for it in items:
+                tname = str(it.get("task_name") or it.get("name") or it.get("task") or "")
+                if not tname:
+                    continue
+                for k in ("test_mae","final_mae","val_mae","best_val_mae"):
+                    v = it.get(k)
+                    if v is not None:
+                        try:
+                            out[tname] = float(v)
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    if out:
+        return out
+
+    pc = run_dir / "per_task_perf.csv"
+    if pc.exists():
+        try:
+            P = pd.read_csv(pc)
+            tcol = None
+            for cand in ("task_name","name","task"):
+                if cand in P.columns:
+                    tcol = cand
+                    break
+            if tcol is not None:
+                for _, r in P.iterrows():
+                    tname = str(r.get(tcol) or "")
+                    if not tname:
+                        continue
+                    for k in ("test_mae","final_mae","val_mae"):
+                        if k in P.columns and pd.notna(r.get(k)):
+                            try:
+                                out[tname] = float(r[k])
+                                break
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+    return out
+
 # ===========================
 # Tabla principal de resultados
 # ===========================
@@ -275,6 +342,7 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
       - resumen de eficiencia (elapsed_sec, emisiones, kWh, kg/h, etc.)
       - métricas por tarea (final_mae, best_mae, forgetting abs/rel)
       - medias de olvido (avg_forget_abs, avg_forget_rel)
+
     Es robusto a runs antiguos sin eval_matrix ni CodeCarbon.
     """
     outputs_root = Path(outputs_root)
@@ -293,7 +361,7 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
                 "model": eff.get("model"),
                 "seed": eff.get("seed"),
                 "T": eff.get("T"),
-                "B": eff.get("batch_size"),
+                "B": eff.get("batch_size") if eff.get("batch_size") is not None else eff.get("B"),
                 "amp": eff.get("amp"),
                 "params": eff.get("params_total"),
                 "elapsed_sec": eff.get("elapsed_sec"),
@@ -318,9 +386,18 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
                 row["B"] = mf["batch_size"]
             if "amp" in mf and row.get("amp") is None:
                 row["amp"] = mf["amp"]
-            # si seed faltaba y el manifest la tiene
             if "seed" in mf and (row.get("seed") is None or (isinstance(row.get("seed"), float) and math.isnan(row["seed"]))):
                 row["seed"] = mf["seed"]
+
+        # 4.bis) Normaliza alias batch_size
+        if "B" in row and row["B"] is not None:
+            try:
+                row["B"] = int(row["B"])
+            except Exception:
+                pass
+            row["batch_size"] = row["B"]
+        elif "batch_size" in row and row["batch_size"] is not None:
+            row["B"] = row["batch_size"]
 
         # 5) Rellena kg_per_hour si faltaba: usar duration_s o elapsed_sec
         if ("kg_per_hour" not in row or row.get("kg_per_hour") is None) and (row.get("emissions_kg") is not None):
@@ -335,25 +412,45 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
         # 6) Asegura eval_matrix.* (o reconstruye desde continual_results.json)
         tasks, M = ensure_eval_matrix_files(run_dir)
 
-        # 7) Derivadas por tarea
+        # 7) Derivadas por tarea (desde eval_matrix)
         forget_abs_vals, forget_rel_vals = [], []
         if tasks and M:
             final_idx = len(tasks) - 1
             for i, ti in enumerate(tasks):
-                best, final, f_abs, f_rel = _row_best_final_forgetting(M[i])
-                if (math.isnan(final) or final is None) and final_idx < len(M[i]):
+                # convierte fila a floats
+                row_vals = []
+                try:
+                    row_vals = [float(v) if v is not None else math.nan for v in M[i]]
+                except Exception:
+                    row_vals = M[i]
+                best, final, f_abs, f_rel = _row_best_final_forgetting(row_vals)
+                # si final está vacío, intenta usar la última columna explícitamente
+                if (final is None or (isinstance(final, float) and math.isnan(final))) and final_idx < len(row_vals):
                     try:
-                        final = float(M[i][final_idx])
+                        v = float(row_vals[final_idx])
+                        if not (isinstance(v, float) and math.isnan(v)):
+                            final = v
                     except Exception:
-                        final = math.nan
+                        pass
+
                 row[f"{ti}_best_mae"]   = best
                 row[f"{ti}_final_mae"]  = final
                 row[f"{ti}_forget_abs"] = f_abs
                 row[f"{ti}_forget_rel"] = f_rel
-                if not math.isnan(f_abs):
+                if f_abs is not None and not (isinstance(f_abs, float) and math.isnan(f_abs)):
                     forget_abs_vals.append(f_abs)
-                if not math.isnan(f_rel):
+                if f_rel is not None and not (isinstance(f_rel, float) and math.isnan(f_rel)):
                     forget_rel_vals.append(f_rel)
+
+        # 7.bis) Fallback: si algún *_final_mae quedó NaN, usa per_task_perf
+        if tasks:
+            per_task = _read_per_task_perf(run_dir)
+            if per_task:
+                for ti in tasks:
+                    col = f"{ti}_final_mae"
+                    if col not in row or row[col] is None or (isinstance(row[col], float) and math.isnan(row[col])):
+                        if ti in per_task:
+                            row[col] = per_task[ti]
 
         # 8) Agregados de olvido
         row["avg_forget_abs"] = float(np.mean(forget_abs_vals)) if forget_abs_vals else np.nan
@@ -365,13 +462,12 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
 
     # 9) Orden de columnas (y evitar duplicados)
     first = [
-        "run_dir", "preset", "method", "encoder", "model", "seed", "T", "B", "amp",
+        "run_dir", "preset", "method", "encoder", "model", "seed", "T", "B", "batch_size", "amp",
         "params", "elapsed_sec", "duration_s", "emissions_kg", "energy_kwh",
         "kg_per_hour", "avg_forget_abs", "avg_forget_rel"
     ]
     other = [c for c in df.columns if c not in first]
     df = df.reindex(columns=[*first, *other])
-    # elimina columnas duplicadas si las hubiera
     df = df.loc[:, ~df.columns.duplicated()]
 
     # 10) Orden “humano”

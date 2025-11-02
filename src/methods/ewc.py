@@ -1,32 +1,36 @@
 # -*- coding: utf-8 -*-
-"""
-EWC (Elastic Weight Consolidation) para mitigar el olvido catastrófico.
-
-Puntos clave:
+"""EWC (Elastic Weight Consolidation) para mitigar el olvido catastrófico.
+Decisiones:
+- EWC usa el MISMO helper de training/eval (_forward_with_cached_orientation)
+  → unifica orientación 5D y runtime-encode (4D→5D) sin duplicar lógica.
 - estimate_fisher():
   * model.eval() durante la estimación, y restaura el modo previo al final.
-  * SIN AMP/autocast para estabilidad numérica (usa torch.amp.autocast(..., enabled=False)).
-  * acumula grad^2 a lo largo de 'fisher_batches' y promedia.
+  * Forward con AMP ACTIVADO (use_amp=True) para replicar training/val y reducir memoria.
+  * Acumula grad^2 a lo largo de 'fisher_batches' y promedia.
   * Invariante a batch size: se fuerza loss.mean() y NO se multiplica por B.
-  * Ajuste robusto de formas: si y_hat=(B,1) y y=(B,), se usa y=(B,1).
+  * Alinea y contra y_hat (B vs B×1) de forma robusta y calcula la loss en FP32.
 - penalty(): λ * Σ F_i (θ_i - θ*_i)^2
-- EWCMethod.after_task(): trazas de Fisher controlables por env var EWC_FISHER_LOG (1=ON, 0=OFF)
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Dict
+
 import torch
-from torch import nn, amp as ta
+from torch import nn
 
+# Reutilizamos el helper común (misma ruta que training/eval)
+from src.training import _forward_with_cached_orientation
 
-# Importamos el helper de permutación desde training para no duplicar lógica
-try:
-    from src.training import _permute_if_needed
-except Exception:
-    # Fallback por si se usa este módulo de forma aislada
-    def _permute_if_needed(x: torch.Tensor) -> torch.Tensor:
-        if x.ndim == 5 and x.shape[0] != x.shape[1]:
-            return x.permute(1, 0, 2, 3, 4).contiguous()
-        return x
+def _align_target_shape(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Alinea forma del target con la predicción:
+    - Si y_hat=(B,1) y y=(B,) -> y=(B,1)
+    - Si y_hat=(B,)  y y=(B,1) -> y=(B,)
+    """
+    if y_hat.ndim == 2 and y_hat.shape[1] == 1 and y.ndim == 1:
+        return y.unsqueeze(1)
+    if y_hat.ndim == 1 and y.ndim == 2 and y.shape[1] == 1:
+        return y.squeeze(1)
+    return y
 
 
 @dataclass
@@ -37,17 +41,12 @@ class EWCConfig:
 
 
 class EWC:
-    """
-    Implementación sencilla de EWC con Fisher diagonal.
-
-    - penalty(): devuelve el término λ * Σ F_i (θ_i - θ*_i)^2
-    - estimate_fisher(): estima F_i como media de grad^2 en 'fisher_batches' minibatches
-    """
+    """Implementación sencilla de EWC con Fisher diagonal."""
     def __init__(self, model: nn.Module, cfg: EWCConfig):
         self.model = model
         self.cfg = cfg
         self._fisher: dict[str, torch.Tensor] = {}
-        self._mu: dict[str, torch.Tensor] = {}   # copia de parámetros tras consolidar cada tarea
+        self._mu: dict[str, torch.Tensor] = {}  # copia de parámetros tras consolidar cada tarea
 
     @torch.no_grad()
     def _snapshot_params(self) -> dict[str, torch.Tensor]:
@@ -63,55 +62,64 @@ class EWC:
         """
         Estima el Fisher diagonal promediando grad^2 en 'fisher_batches' minibatches del loader dado.
 
-        - Modo eval() para desactivar dropout/bn durante la estimación.
-        - SIN autocast/AMP para mayor estabilidad numérica (torch.amp.autocast(..., enabled=False)).
-        - Ajuste de formas para pérdidas de regresión (p.ej. y=(B,) vs y_hat=(B,1)).
-        - Invariante a batch size: se fuerza loss.mean() y NO se multiplica por B.
-
-        Devuelve el número de batches usados.
+        - Usa el MISMO helper que training/eval (orientación y runtime-encode).
+        - model.eval() durante la estimación; restaura el modo previo al final.
+        - Forward con AMP ACTIVADO (use_amp=True) para memoria/estabilidad.
+        - Loss en FP32 y con mean() para invariancia a batch size.
         """
-        # Pasamos a eval y guardamos el estado previo para restaurarlo al final
         was_training = self.model.training
         self.model.eval()
 
-        # Loss robusta por defecto (si no se provee)
         fisher_loss_fn = loss_fn if loss_fn is not None else nn.MSELoss()
 
-        # Inicializa tensores del mismo tamaño que cada parámetro
+        # Inicializa acumuladores
         fisher = {
             n: torch.zeros_like(p, device=p.device)
             for n, p in self.model.named_parameters()
             if p.requires_grad
         }
+        # Congela θ* (después de la tarea)
         self._mu = self._snapshot_params()
 
         n_batches = 0
         cap = int(self.cfg.fisher_batches)
 
-        # Autocast explícito vía torch.amp.autocast (API nueva)
-        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        # Hint local para la orientación durante Fisher
+        phase_hint: Dict[str, str] = {"fisher": None}
 
         for x, y in loader:
-            x = _permute_if_needed(x.to(device, non_blocking=True))
+            # y al device (el helper usa B=y.shape[0] para decidir orientación)
             y = y.to(device, non_blocking=True)
 
-            # Necesitamos gradiente → no torch.no_grad() aquí
+            # Forward consistente con training/eval (incluye runtime-encode si aplica)
+            # *** CAMBIO 1: use_amp=True ***
+            y_hat = _forward_with_cached_orientation(
+                model=self.model,
+                x=x,
+                y=y,
+                device=device,
+                use_amp=True,
+                phase_hint=phase_hint,
+                phase="fisher",
+            )
+
+            # Alinear shapes/dtypes/devices
+            y_aligned = _align_target_shape(y_hat, y).to(
+                device=y_hat.device, dtype=y_hat.dtype, non_blocking=True
+            )
+
+            # *** CAMBIO 2: loss en FP32 (estable) ***
+            y_hat_fp32 = y_hat.to(torch.float32)
+            y_fp32 = y_aligned.to(torch.float32)
+            loss = fisher_loss_fn(y_hat_fp32, y_fp32)
+            if loss.dim() > 0:
+                loss = loss.mean()
+
+            # Gradientes (sin GradScaler; ya estamos en FP32 para la loss)
             self.model.zero_grad(set_to_none=True)
-
-            # ---- FORWARD sin AMP y con loss.mean() para estabilizar escala ----
-            with ta.autocast(device_type, enabled=False):
-                y_hat = self.model(x)
-                # Ajuste de forma robusto: si y_hat=(B,1) y y=(B,), pasamos y->(B,1)
-                if y_hat.ndim == 2 and y_hat.shape[1] == 1 and y.ndim == 1:
-                    y = y.unsqueeze(1)
-                loss = fisher_loss_fn(y_hat, y)
-                if loss.dim() > 0:
-                    loss = loss.mean()
-
-            # backward "normal" (sin GradScaler)
             loss.backward()
 
-            # Acumular grad^2 en cada parámetro (SIN escalar por B)
+            # Acumular grad^2
             with torch.no_grad():
                 for n, p in self.model.named_parameters():
                     if p.requires_grad and p.grad is not None:
@@ -121,6 +129,10 @@ class EWC:
             if n_batches >= cap:
                 break
 
+            # Limpieza ligera para evitar fragmentación en secuencias largas
+            if torch.cuda.is_available() and (n_batches % 50 == 0):
+                torch.cuda.empty_cache()
+
         # Media sobre los batches procesados
         denom = max(1, n_batches)
         for n in fisher:
@@ -129,19 +141,15 @@ class EWC:
         # Guardamos la estimación consolidada
         self._fisher = {n: f.detach().clone() for n, f in fisher.items()}
 
-        # Restaurar modo entrenamiento si estaba así
+        # Restaurar modo anterior
         if was_training:
             self.model.train()
-
         return n_batches
 
     def penalty(self) -> torch.Tensor:
-        """
-        λ * Σ F_i (θ_i - θ*_i)^2. Si no hay Fisher estimado, devuelve 0 (constante)
-        para no romper backward ni sacar '-0.0' en logs.
-        """
+        """λ * Σ F_i (θ_i - θ*_i)^2. Si no hay Fisher estimado, devuelve 0."""
         if not self._fisher:
-            # Constante 0.0 en el device correcto; no hace falta "enganchar" el grad.
+            # Constante 0.0 en el device correcto
             dev = next(self.model.parameters()).device
             return torch.tensor(0.0, device=dev)
 

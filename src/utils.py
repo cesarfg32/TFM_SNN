@@ -272,6 +272,10 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int,
         f"to_gray={want_gray}, gain={want_gain}"
     )
 
+# src/utils.py  — reemplaza completamente esta función
+
+from torch.utils.data import DataLoader
+import torch
 from .datasets import H5SpikesDataset
 
 def make_loaders_from_h5(
@@ -280,9 +284,21 @@ def make_loaders_from_h5(
     num_workers: int = 4, pin_memory: bool = True,
     persistent_workers: bool = True, prefetch_factor: int | None = 2
 ):
-    """
-    Crea DataLoaders desde H5 (spikes offline). Devuelve (tr, va, te).
-    """
+    """Crea DataLoaders desde H5 (spikes offline) con orientación (T,B,C,H,W) en el batch."""
+
+    # --- Collate específico H5: (B,T,C,H,W) -> (T,B,C,H,W) ---
+    def _collate_h5(batch):
+        # batch: lista de B tuplas [(x_i, y_i), ...]
+        # x_i: (T,C,H,W)   y_i: (1,)
+        xs, ys = zip(*batch)
+        x = torch.stack(xs, dim=0)                  # (B,T,C,H,W)
+        if x.ndim != 5:
+            raise ValueError(f"Esperaba 5D (B,T,C,H,W) desde H5; recibido {tuple(x.shape)}")
+        x = x.permute(1, 0, 2, 3, 4).contiguous()   # (T,B,C,H,W)  ← lo que esperan tus modelos
+        y = torch.stack(ys, dim=0)                  # (B,1)
+        return x, y
+
+    # Siembra opcional para reproducibilidad
     g = None
     if seed is not None:
         g = torch.Generator().manual_seed(int(seed))
@@ -290,11 +306,16 @@ def make_loaders_from_h5(
     def _mk(path: Path, shuffle: bool):
         ds = H5SpikesDataset(path)
         return DataLoader(
-            ds, batch_size=batch_size, shuffle=shuffle, generator=g,
-            num_workers=num_workers, pin_memory=pin_memory,
+            ds,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            generator=g,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             persistent_workers=(persistent_workers and num_workers > 0),
             prefetch_factor=(prefetch_factor if (num_workers > 0) else None),
-            drop_last=False
+            drop_last=False,
+            collate_fn=_collate_h5,   # ← clave: fijamos orientación aquí
         )
 
     return _mk(train_h5, True), _mk(val_h5, False), _mk(test_h5, False)
