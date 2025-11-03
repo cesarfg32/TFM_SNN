@@ -1,4 +1,3 @@
-# src/methods/sca_snn.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from dataclasses import dataclass
@@ -7,7 +6,6 @@ from typing import Optional, Tuple, List, Dict
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
@@ -45,7 +43,6 @@ def _find_first_linear(m: nn.Module) -> Optional[nn.Module]:
             return mod
     return None
 
-
 def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
     cur = m
     for p in path.split("."):
@@ -53,7 +50,6 @@ def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
             return None
         cur = getattr(cur, p)
     return cur if isinstance(cur, nn.Module) else None
-
 
 def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tuple[torch.Tensor, tuple[int, ...], bool]:
     """Normaliza a (T,B,N) para aplicar máscara por neurona."""
@@ -78,7 +74,6 @@ def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tu
         return y.flatten(3).mean(3), orig, (T_hint is not None)
     return y, orig, False
 
-
 def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, flatten_spatial: bool) -> torch.Tensor:
     if len(orig_shape) == 2:
         return yTBN.squeeze(0)
@@ -90,19 +85,16 @@ def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, 
         return yTBN
     return yTBN
 
-
 def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Tensor:
     y = y.clamp(min=lo, max=hi)
     t = (y - lo) / max(1e-8, (hi - lo))
     idx = torch.floor(t * num_bins).long()
     return idx.clamp_(0, num_bins - 1)
 
-
 def _row_normalize_pos(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     x = torch.relu(x)
     s = x.sum(dim=1, keepdim=True) + eps
     return x / s
-
 
 def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     p = (p + eps) / (p.sum(dim=1, keepdim=True) + eps)
@@ -110,7 +102,6 @@ def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.
     kl_pq = (p * (p.add(eps).log() - q.add(eps).log())).sum(dim=1)
     kl_qp = (q * (q.add(eps).log() - p.add(eps).log())).sum(dim=1)
     return 0.5 * (kl_pq + kl_qp)
-
 
 def _similarity_from_kl(kl_vals: torch.Tensor) -> float:
     s = (1.0 / (1.0 + kl_vals)).clamp(0.0, 1.0)
@@ -132,9 +123,7 @@ class SCA_SNN:
             f"_ab{self.cfg.anchor_batches}"
             f"_flat{int(self.cfg.flatten_spatial)}"
         )
-
         self._anchors_prev: List[torch.Tensor] = []
-
         self._target: Optional[nn.Module] = None
         self._hook_handle: Optional[torch.utils.hooks.RemovableHandle] = None
         self._model_pre_hook_handle: Optional[torch.utils.hooks.RemovableHandle] = None
@@ -170,6 +159,7 @@ class SCA_SNN:
         if not torch.is_tensor(out) or self._N is None or self._R is None:
             return out
 
+        # Normaliza forma y aplica máscara
         yTBN, orig, need_back = _to_TBN(out, self._T_seq, self.cfg.flatten_spatial)
         T, B, N = yTBN.shape
         if N != self._N:
@@ -178,15 +168,16 @@ class SCA_SNN:
 
         rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
         Rn = torch.sigmoid(self._R)  # (N,)
+
         if self.cfg.soft_mask_temp > 0.0:
             m = torch.sigmoid((Rn - rho) / max(1e-6, self.cfg.soft_mask_temp)).view(1, 1, N)
         else:
             m = (Rn > rho).to(yTBN.dtype).view(1, 1, N)
-
         if m.device != yTBN.device:
             m = m.to(yTBN.device, non_blocking=True)
 
         yTBN = yTBN * m
+        yTBN = torch.nan_to_num(yTBN)
 
         if self.cfg.verbose:
             self._step += 1
@@ -203,24 +194,18 @@ class SCA_SNN:
 
     # -------- grad hook: acumular por neurona --------
     def _weight_grad_hook(self, grad: torch.Tensor):
-        # grad: shape (N_out, N_in) en el device del peso
         if not torch.is_tensor(grad):
             return
-
         dev = grad.device
         n_out = grad.shape[0]
-
-        # Asegura que _Gacc y _R existan y estén en el mismo device que grad
         with torch.no_grad():
             if (self._Gacc is None) or (self._Gacc.numel() != n_out):
                 self._Gacc = torch.zeros(n_out, dtype=torch.float32, device=dev)
             elif self._Gacc.device != dev:
                 self._Gacc = self._Gacc.to(dev, non_blocking=True)
-
             if (self._R is not None) and (self._R.device != dev):
                 self._R = self._R.to(dev, non_blocking=True)
 
-            # Acumula norma L2 por fila
             g_row = grad.pow(2).sum(dim=1).sqrt()  # (N_out,)
             self._Gacc.add_(g_row)
 
@@ -246,12 +231,11 @@ class SCA_SNN:
         lo, hi = float(self.cfg.bin_lo), float(self.cfg.bin_hi)
         max_batches = int(self.cfg.anchor_batches)
 
-        # Hook temporal: guarda out bruto
-        outs_raw: List[torch.Tensor] = []
-
+        # Hook temporal: guarda out bruto (un solo buffer)
+        grab = {"out": None}
         def _cap_hook(_m, _inp, out):
             if torch.is_tensor(out):
-                outs_raw.append(out.detach())
+                grab["out"] = out.detach()
 
         tmp_handle = self._target.register_forward_hook(_cap_hook, with_kwargs=False)
 
@@ -260,6 +244,7 @@ class SCA_SNN:
 
         was_training = model.training
         model.eval()
+
         try:
             batches_seen = 0
             for x, y in loader:
@@ -267,26 +252,15 @@ class SCA_SNN:
                 y = y.to(device, non_blocking=True).view(-1)  # (B,)
                 B = int(y.shape[0])
 
-                # intentar inferir T_local del batch
-                T_local = None
-                if torch.is_tensor(x):
-                    if x.ndim == 5:
-                        if self._T_seq and (x.shape[0] == self._T_seq):
-                            T_local = int(x.shape[0])
-                        elif self._T_seq and (x.shape[1] == self._T_seq):
-                            T_local = int(x.shape[1])
-                        else:
-                            if x.shape[0] == B:
-                                T_local = int(x.shape[1])
-                            elif x.shape[1] == B:
-                                T_local = int(x.shape[0])
-                    elif x.ndim == 4:
-                        T_local = 1
+                # Desactiva autocast SOLO aquí para evitar NaNs en FP16 durante las anclas
+                dev_type = "cuda" if torch.cuda.is_available() else "cpu"
+                with torch.amp.autocast(device_type=dev_type, enabled=False):
+                    _ = model(x)  # dispara hook
 
-                _ = model(x)  # dispara hook
-                if not outs_raw:
+                raw = grab["out"]
+                grab["out"] = None
+                if raw is None:
                     continue
-                raw = outs_raw.pop()
 
                 # Normalizar a (B,N)
                 if raw.ndim == 2:
@@ -294,12 +268,6 @@ class SCA_SNN:
                         F = raw
                     elif raw.shape[1] == B:
                         F = raw.transpose(0, 1).contiguous()
-                    elif T_local is not None and raw.shape[0] == T_local:
-                        # (T,N) detectado -> promediamos T y expandimos a (B,N)
-                        F = raw.mean(dim=0, keepdim=True).expand(B, -1)
-                    elif raw.shape[0] != B:
-                        # fallback robusto: promedia 1ª dim y expande
-                        F = raw.mean(dim=0, keepdim=True).expand(B, -1)
                     elif raw.shape[0] % B == 0:
                         Tguess = raw.shape[0] // B
                         F = raw.view(Tguess, B, -1).mean(dim=0)
@@ -331,7 +299,7 @@ class SCA_SNN:
 
                 if F.device != device:
                     F = F.to(device, non_blocking=True)
-                F = F.float()  # (B,N)
+                F = torch.nan_to_num(F.float())  # (B,N), FP32 estable
 
                 # Binning y acumulación
                 bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
@@ -358,7 +326,6 @@ class SCA_SNN:
         anchors = torch.stack([
             (sum_per_bin[b] / max(1, cnt_per_bin[b])) for b in range(num_bins)
         ], dim=0)  # (num_bins, N)
-
         anchors = _row_normalize_pos(anchors)
         return anchors
 
@@ -398,9 +365,8 @@ class SCA_SNN:
                     q = torch.tensor(1.0, device=g.device if isinstance(g, torch.Tensor) else dev)
                 if float(q) <= 1e-9:
                     q = torch.tensor(1.0, device=g.device if isinstance(g, torch.Tensor) else dev)
-                self._R.add_(g / q)   # misma lógica, sin clone intermedio
+                self._R.add_(g / q)
                 self._Gacc.zero_()
-
         return torch.zeros((), dtype=torch.float32, device=dev)
 
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
@@ -458,12 +424,10 @@ class SCA_SNN:
                   f"habit_decay={self.cfg.habit_decay}")
 
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
-        # --- NUEVO: vaciar acumuladores para que el estado serializado quede limpio ---
         try:
-            _ = self.penalty()  # fuerza el decay + reset de Gacc aquí (solo efectos en estado)
+            _ = self.penalty()  # decay + reset Gacc
         except Exception:
             pass
-        # ------------------------------------------------------------------------------
         if self._target is None or self._N is None:
             return
         dev_target = self._ensure_target_device()

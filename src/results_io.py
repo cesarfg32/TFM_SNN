@@ -1,7 +1,5 @@
-# src/results_io.py
 # -*- coding: utf-8 -*-
-"""
-results_io.py
+"""results_io.py
 --------------
 Utilidades para leer resultados de runs continual_* y construir una tabla
 consolidada robusta a runs antiguos (sin eval_matrix.csv/json, sin CodeCarbon, etc).
@@ -135,6 +133,16 @@ def rebuild_eval_matrix_from_results(run_dir: Path) -> Tuple[List[str], List[Lis
                     M[i][j] = math.nan
     return tasks, M
 
+def _invalid_last_col_all_nan(tasks: List[str], M: List[List[float]]) -> bool:
+    try:
+        A = np.array(M, dtype=float)
+        if A.ndim != 2 or A.shape[0] != len(tasks) or A.shape[1] < 1:
+            return True
+        last_col = A[:, -1]
+        return not np.isfinite(last_col).any()
+    except Exception:
+        return True
+
 def ensure_eval_matrix_files(run_dir: Path) -> Tuple[List[str], List[List[float]]]:
     run_dir = Path(run_dir)
     csvp = run_dir / "eval_matrix.csv"
@@ -145,7 +153,8 @@ def ensure_eval_matrix_files(run_dir: Path) -> Tuple[List[str], List[List[float]
         data = _safe_json_load(jsp)
         tasks = data.get("tasks") or []
         M = data.get("mae_matrix") or []
-        if tasks and M:
+        # Invalida si la última columna no tiene ningún valor finito
+        if tasks and M and not _invalid_last_col_all_nan(tasks, M):
             return tasks, M
 
     # 2) CSV
@@ -163,7 +172,8 @@ def ensure_eval_matrix_files(run_dir: Path) -> Tuple[List[str], List[List[float]
                 .values
                 .tolist()
             )
-            return tasks, M
+            if tasks and M and not _invalid_last_col_all_nan(tasks, M):
+                return tasks, M
         except Exception:
             pass
 
@@ -293,7 +303,7 @@ def _read_per_task_perf(run_dir: Path) -> Dict[str, float]:
                 tname = str(it.get("task_name") or it.get("name") or it.get("task") or "")
                 if not tname:
                     continue
-                for k in ("test_mae","final_mae","val_mae","best_val_mae"):
+                for k in ("final_mae", "test_mae", "val_mae", "best_val_mae"):
                     v = it.get(k)
                     if v is not None:
                         try:
@@ -321,7 +331,7 @@ def _read_per_task_perf(run_dir: Path) -> Dict[str, float]:
                     tname = str(r.get(tcol) or "")
                     if not tname:
                         continue
-                    for k in ("test_mae","final_mae","val_mae"):
+                    for k in ("final_mae","test_mae","val_mae"):
                         if k in P.columns and pd.notna(r.get(k)):
                             try:
                                 out[tname] = float(r[k])
@@ -399,17 +409,17 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
         elif "batch_size" in row and row["batch_size"] is not None:
             row["B"] = row["batch_size"]
 
-        # 5) Rellena kg_per_hour si faltaba: usar duration_s o elapsed_sec
+        # 5) kg_per_hour si faltaba
         if ("kg_per_hour" not in row or row.get("kg_per_hour") is None) and (row.get("emissions_kg") is not None):
             dur_s = None
-            if row.get("duration_s"):  # de CodeCarbon
+            if row.get("duration_s"):  # CodeCarbon
                 dur_s = float(row["duration_s"])
-            elif row.get("elapsed_sec"):  # del runner
+            elif row.get("elapsed_sec"):  # runner
                 dur_s = float(row["elapsed_sec"])
             if dur_s and dur_s > 0:
                 row["kg_per_hour"] = float(row["emissions_kg"]) / max(1e-9, (dur_s/3600.0))
 
-        # 6) Asegura eval_matrix.* (o reconstruye desde continual_results.json)
+        # 6) Asegura eval_matrix.* (o reconstruye)
         tasks, M = ensure_eval_matrix_files(run_dir)
 
         # 7) Derivadas por tarea (desde eval_matrix)
@@ -418,13 +428,12 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
             final_idx = len(tasks) - 1
             for i, ti in enumerate(tasks):
                 # convierte fila a floats
-                row_vals = []
                 try:
                     row_vals = [float(v) if v is not None else math.nan for v in M[i]]
                 except Exception:
                     row_vals = M[i]
                 best, final, f_abs, f_rel = _row_best_final_forgetting(row_vals)
-                # si final está vacío, intenta usar la última columna explícitamente
+                # si final está vacío, usa la última columna explícitamente
                 if (final is None or (isinstance(final, float) and math.isnan(final))) and final_idx < len(row_vals):
                     try:
                         v = float(row_vals[final_idx])
@@ -474,5 +483,4 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
     sort_cols = [c for c in ["preset", "method", "encoder", "seed"] if c in df.columns]
     if sort_cols:
         df = df.sort_values(sort_cols, na_position="last", ignore_index=True)
-
     return df

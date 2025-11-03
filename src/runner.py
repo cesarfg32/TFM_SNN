@@ -1,7 +1,7 @@
-# --- en runner.py, al principio del fichero ---
+# --- runner.py (COMPLETO) ---
 from __future__ import annotations
 from pathlib import Path
-import sys, json, torch, math, os, time as _time, logging, platform
+import sys, json, torch, math, os, time as _time, logging, platform, gc
 from typing import Dict, Any, Tuple, List, Optional
 
 # Entorno seguro para WSL/HDF5
@@ -17,7 +17,7 @@ except Exception:
     pass
 
 def _get_mp_ctx():
-    # En Linux/WSL suele ir mejor 'forkserver' que 'fork' con PyTorch + CUDA.
+    # En Linux/WSL suele ir mejor 'forkserver' que 'spawn' con PyTorch + CUDA.
     for name in ("forkserver", "spawn"):
         try:
             return mp.get_context(name)
@@ -75,10 +75,10 @@ def _build_eval_matrix(results: Dict[str, Dict[str, float]]) -> Tuple[List[str],
     return names, mat
 
 def _compute_forgetting(names: List[str], mat: List[List[float]]) -> Dict[str, Dict[str, float]]:
-    n = len(names)
     out: Dict[str, Dict[str, float]] = {}
+    n = len(names)
     for i in range(n):
-        row = [v for v in mat[i] if not math.isnan(v)]
+        row = [v for v in mat[i] if not (isinstance(v, float) and math.isnan(v))]
         if not row:
             out[names[i]] = {"forget_abs": math.nan, "forget_rel": math.nan}
             continue
@@ -168,6 +168,27 @@ def _write_task_manifest(task_dir: Path, meta: Dict[str, Any], history: Dict[str
     }
     _safe_write(Path(task_dir) / "manifest.json", payload)
 
+def _nan_to_none_matrix(M: List[List[float]]) -> List[List[Optional[float]]]:
+    out: List[List[Optional[float]]] = []
+    for row in M:
+        out.append([None if (isinstance(v, float) and math.isnan(v)) else float(v) for v in row])
+    return out
+
+def _load_checkpoint_if_exists(task_dir: Path, model: torch.nn.Module, device: torch.device,
+                               candidates=("best.pt", "last.pt", "checkpoint.pt", "model.pt")) -> bool:
+    for name in candidates:
+        p = task_dir / name
+        if p.exists():
+            try:
+                sd = torch.load(p, map_location=device)
+                # soporta guardar {state_dict: ...} o el state_dict directo
+                state_dict = sd.get("state_dict", sd) if isinstance(sd, dict) else sd
+                model.load_state_dict(state_dict, strict=False)
+                return True
+            except Exception:
+                continue
+    return False
+
 # ================================================
 def run_continual(
     task_list: list[dict],
@@ -228,6 +249,7 @@ def run_continual(
     method_kwargs.setdefault("T", T)
     method_obj = build_method(method, model, loss_fn=loss_fn, device=device, **method_kwargs)
 
+    # Logging opcional por método/submétodos
     log_root = (cfg.get("logging", {}) or {})
     def _apply_log_section(obj, key: str):
         sect = log_root.get(key, {}) or {}
@@ -258,7 +280,11 @@ def run_continual(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # -------- Telemetría --------
-    from importlib.metadata import version as _pkg_version, PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+    try:
+        cc_ver = _pkg_version("codecarbon")
+    except Exception:
+        cc_ver = None
     tele_cfg   = (cfg.get("logging", {}) or {}).get("telemetry", {}) or {}
     use_cc     = bool(tele_cfg.get("codecarbon", False))
     cc_offline = bool(tele_cfg.get("offline", True))
@@ -269,10 +295,6 @@ def run_continual(
         logging.getLogger("codecarbon").setLevel(getattr(logging, cc_loglvl.upper(), logging.WARNING))
     except Exception:
         pass
-    try:
-        cc_ver = _pkg_version("codecarbon")
-    except Exception:
-        cc_ver = None
 
     log_telemetry_event(out_dir, {
         "event": "run_start",
@@ -338,7 +360,7 @@ def run_continual(
                 task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
             )
 
-            # Muestra para decidir encode runtime (solo si NO hay offline spikes)
+            # Decide encode runtime si NO hay offline spikes
             xb_sample, _ = next(iter(tr))
             used_rt = False
             if (not use_offline) and xb_sample.ndim == 4:
@@ -346,17 +368,17 @@ def run_continual(
                 used_rt = True
                 if verbose: print("  runtime encode: ON (GPU)")
 
-            # --- SOLO SCA: loader "anclas" con num_workers=0 para evitar /dev/shm ---
+            # SOLO SCA: loader anclas single-worker
             is_sca = "sca-snn" in method_obj.name.lower() or "sca_snn" in method_obj.name.lower()
             tr_anchor = _to_single_worker_loader(tr) if is_sca else tr
 
             if hasattr(method_obj, "prepare_train_loader"):
                 tr = method_obj.prepare_train_loader(tr)
 
-            # --- NUEVO: evento de inicio de tarea (telemetría ligera)
+            # Telemetría inicio de tarea
             log_telemetry_event(out_dir, {"event": "task_start", "task_idx": i, "task_name": name})
 
-            # Antes de la tarea con loader anclas "single-worker" SOLO si SCA
+            # before_task (SCA usa tr_anchor)
             method_obj.before_task(model, tr_anchor, va)
 
             if torch.cuda.is_available():
@@ -364,15 +386,12 @@ def run_continual(
                 torch.cuda.synchronize()
             t0 = _time.time()
 
-            # ============
-            # CAMBIO CLAVE: fallback robusto de DataLoader/WSL
-            # ============
+            # Entrenamiento con fallback WSL
             try:
                 history = train_supervised(
                     model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
                 )
             except Exception as e:
-                # Detectar variantes típicas en WSL (/dev/shm, workers, multiprocesado…)
                 msg = f"{type(e).__name__}: {e}".lower()
                 triggers = (
                     "bus error",
@@ -391,21 +410,20 @@ def run_continual(
                     )
                 else:
                     raise
-            # ============
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t1 = _time.time()
             mem_peak = _torch_cuda_mem_peak_mb()
 
-            # CSV de curvas (historia por epoch)
+            # CSV de curvas
             try:
                 csv_curve = _to_csv_lines_from_history(history or {})
                 (out_dir / f"task_{i}_{name}" / "loss_curves.csv").write_text(csv_curve, encoding="utf-8")
             except Exception:
                 pass
 
-            # Manifest por tarea (meta + history) para plots robustos
+            # Manifest por tarea
             try:
                 meta = {
                     "task_idx": i,
@@ -427,26 +445,28 @@ def run_continual(
                 pass
 
             n_epochs_done = len((history or {}).get("val_loss", []))
+
+            # Eval del task actual y retro-eval de previos
+            te_mae, te_mse = eval_loader(te, model, device)
+            results[name] = {"test_mae": te_mae, "test_mse": te_mse}
+            seen.append((name, te))
+            # retro-eval: tareas anteriores con el modelo actual
+            for pname, p_loader in seen[:-1]:
+                p_mae, p_mse = eval_loader(p_loader, model, device)
+                results[pname][f"after_{name}_mae"] = p_mae
+                results[pname][f"after_{name}_mse"] = p_mse
+
+            # fila de rendimiento por tarea (ahora con test_mae)
             perf_rows.append({
                 "task_idx": i, "task_name": name,
                 "train_time_sec": t1 - t0,
                 "cuda_mem_peak_mb": mem_peak,
                 "batch_size": bs, "amp": use_amp, "encoder": encoder, "T": T,
                 "epochs_done": n_epochs_done,
+                "test_mae": float(te_mae) if te_mae is not None else None,
             })
 
-            # Después de la tarea: idem (solo SCA)
-            if i < len(task_list) and hasattr(method_obj, "after_task"):
-                method_obj.after_task(model, tr_anchor, va)
-
-            te_mae, te_mse = eval_loader(te, model, device)
-            results[name] = {"test_mae": te_mae, "test_mse": te_mse}
-            seen.append((name, te))
-            for pname, p_loader in seen[:-1]:
-                p_mae, p_mse = eval_loader(p_loader, model, device)
-                results[pname][f"after_{name}_mae"] = p_mae
-                results[pname][f"after_{name}_mse"] = p_mse
-
+            # Guardar estado de método si procede
             try:
                 snap = None
                 if hasattr(method_obj, "get_state"):
@@ -462,34 +482,59 @@ def run_continual(
                 set_encode_runtime(None)
                 if verbose: print("  runtime encode: OFF")
 
-            # --- NUEVO: evento de fin de tarea (telemetría ligera)
+            # Telemetría fin de tarea
             log_telemetry_event(out_dir, {"event": "task_end", "task_idx": i, "task_name": name})
+
+            # Limpieza ligera antes de la siguiente tarea
+            try:
+                del xb_sample, tr_anchor
+                del tr, va, te
+            except Exception:
+                pass
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
+    # --- Salidas finales ---
     _safe_write(out_dir / "continual_results.json", results)
     names, mat = _build_eval_matrix(results)
-    eval_mat = {"tasks": names, "mae_matrix": mat}
+
+    # JSON sin NaN (usa null)
+    eval_mat = {"tasks": names, "mae_matrix": _nan_to_none_matrix(mat)}
     _safe_write(out_dir / "eval_matrix.json", eval_mat)
+
+    # CSV con vacío en NaN
     csv_lines = []
     header = ["task"] + [f"after_{n}" for n in names]
     csv_lines.append(",".join(header))
     for i, ti in enumerate(names):
-        row = [ti] + [("" if math.isnan(v) else f"{v:.6f}") for v in mat[i]]
-        csv_lines.append(",".join(row))
+        row_csv = [ti] + [("" if (isinstance(v, float) and math.isnan(v)) else f"{float(v):.6f}") for v in mat[i]]
+        csv_lines.append(",".join(row_csv))
     (out_dir / "eval_matrix.csv").write_text("\n".join(csv_lines), encoding="utf-8")
 
     forgetting = _compute_forgetting(names, mat)
     _safe_write(out_dir / "forgetting.json", forgetting)
 
-    # NUEVO: volcar rendimiento por tarea (json + csv)
-    if len(perf_rows) > 0:
-        _safe_write(out_dir / "per_task_perf.json", perf_rows)
+    # per_task_perf con final_mae (última columna por fila)
+    perf_rows_enriched: List[Dict[str, Any]] = []
+    for i, ti in enumerate(names):
+        row_vals = [v for v in mat[i] if not (isinstance(v, float) and math.isnan(v))]
+        final_mae = float(row_vals[-1]) if row_vals else None
+        base = perf_rows[i] if i < len(perf_rows) else {"task_idx": i+1, "task_name": ti}
+        base = dict(base)
+        base["final_mae"] = final_mae
+        perf_rows_enriched.append(base)
+
+    if len(perf_rows_enriched) > 0:
+        _safe_write(out_dir / "per_task_perf.json", perf_rows_enriched)
         # CSV
-        perf_csv_h = ["task_idx","task_name","train_time_sec","cuda_mem_peak_mb","batch_size","amp","encoder","T","epochs_done"]
+        perf_csv_h = ["task_idx","task_name","train_time_sec","cuda_mem_peak_mb","batch_size",
+                      "amp","encoder","T","epochs_done","test_mae","final_mae"]
         lines = [",".join(perf_csv_h)]
-        for r in perf_rows:
+        for r in perf_rows_enriched:
             lines.append(",".join([str(r.get(k,"")) for k in perf_csv_h]))
         (out_dir / "per_task_perf.csv").write_text("\n".join(lines), encoding="utf-8")
 
@@ -520,13 +565,14 @@ def run_continual(
     c2_final_mae = None
     if c2_name is not None:
         row_idx = names.index(c2_name)
-        row_vals = [v for v in mat[row_idx] if not math.isnan(v)]
+        row_vals = [v for v in mat[row_idx] if not (isinstance(v, float) and math.isnan(v))]
         if row_vals:
             c2_final_mae = float(row_vals[-1])
 
     avg_forget_rel = None
     try:
-        vals = [v.get("forget_rel") for v in forgetting.values() if isinstance(v, dict) and "forget_rel" in v]
+        vals = [v.get("forget_rel") for v in forgetting.values()
+                if isinstance(v, dict) and "forget_rel" in v]
         vals = [float(x) for x in vals if (x is not None and not math.isnan(x))]
         if vals:
             avg_forget_rel = sum(vals)/len(vals)
@@ -571,3 +617,258 @@ def run_continual(
 
     log_telemetry_event(out_dir, {"event": "run_end", "elapsed_sec": elapsed, "emissions_kg": emissions_kg})
     return out_dir, results
+
+
+# =========================================================
+# NUEVO: Reevaluación SOLO-EVAL de un run ya entrenado
+# =========================================================
+def reevaluate_only(
+    out_dir: Path | str,
+    task_list: list[dict],
+    make_loader_fn,
+    make_model_fn,
+    tfm,
+    cfg: Dict[str, Any],
+    preset_name: str,
+    ckpt_candidates=("best.pt", "last.pt", "checkpoint.pt", "model.pt"),
+    verbose: bool = True,
+) -> Path:
+    """
+    Regenera eval_matrix.json/csv, forgetting.json y per_task_perf.* SIN reentrenar.
+    Carga un checkpoint por tarea (snapshot tras terminar esa tarea) y evalúa todas las tareas <= j.
+    """
+    out_dir = Path(out_dir)
+    data = cfg["data"]; optim = cfg["optim"]
+    encoder  = str(data["encoder"])
+    T        = int(data["T"])
+    gain     = float(data["gain"])
+    seed     = int(data.get("seed", 42))
+    bs       = int(optim["batch_size"])
+
+    device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model   = make_model_fn(tfm).to(device)
+    loss_fn = torch.nn.MSELoss()
+
+    # Preconstruir loaders de TEST por tarea (misma cfg que el entrenamiento)
+    dl_kwargs = dict(
+        num_workers         = int(data["num_workers"]),
+        pin_memory          = bool(data["pin_memory"]),
+        persistent_workers  = False,
+        prefetch_factor     = data["prefetch_factor"],
+        drop_last           = False,
+        pin_memory_device   = data.get("pin_memory_device", "cuda"),
+        timeout             = 0,
+    )
+    tests: List[Tuple[str, Any]] = []
+    for i, t in enumerate(task_list, start=1):
+        _, _, te = make_loader_fn(task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs)
+        tests.append((t["name"], te))
+
+    names = [t["name"] for t in task_list]
+    n = len(names)
+    mat = [[math.nan for _ in range(n)] for _ in range(n)]
+    perf_rows: List[Dict[str, Any]] = []
+
+    # Por cada snapshot j, cargar checkpoint y evaluar tasks <= j
+    for j, name in enumerate(names, start=1):
+        tdir = out_dir / f"task_{j}_{name}"
+        ok = _load_checkpoint_if_exists(tdir, model, device, ckpt_candidates)
+        if not ok:
+            if verbose:
+                print(f"[WARN] No se encontró checkpoint en {tdir}; la columna {j} quedará incompleta.")
+            continue
+
+        model.eval()
+        with torch.no_grad():
+            # Eval de la tarea j (diagonal)
+            tj_name, tj_loader = tests[j-1]
+            mae_j, mse_j = eval_loader(tj_loader, model, device)
+            mat[j-1][j-1] = float(mae_j) if mae_j is not None else math.nan
+
+            # Finalizar columna j evaluando i<=j
+            for i_idx in range(0, j):
+                ti_name, ti_loader = tests[i_idx]
+                mae_i, _ = eval_loader(ti_loader, model, device)
+                mat[i_idx][j-1] = float(mae_i) if mae_i is not None else math.nan
+
+    # Guardar eval_matrix y derivados
+    eval_mat = {"tasks": names, "mae_matrix": _nan_to_none_matrix(mat)}
+    _safe_write(out_dir / "eval_matrix.json", eval_mat)
+
+    csv_lines = []
+    header = ["task"] + [f"after_{n}" for n in names]
+    csv_lines.append(",".join(header))
+    for i, ti in enumerate(names):
+        row_csv = [ti] + [("" if (isinstance(v, float) and math.isnan(v)) else f"{float(v):.6f}") for v in mat[i]]
+        csv_lines.append(",".join(row_csv))
+    (out_dir / "eval_matrix.csv").write_text("\n".join(csv_lines), encoding="utf-8")
+
+    forgetting = _compute_forgetting(names, mat)
+    _safe_write(out_dir / "forgetting.json", forgetting)
+
+    # per_task_perf con test_mae (diag) y final_mae (última col)
+    for i, ti in enumerate(names):
+        row_vals = [v for v in mat[i] if not (isinstance(v, float) and math.isnan(v))]
+        final_mae = float(row_vals[-1]) if row_vals else None
+        test_mae  = float(mat[i][i]) if not (isinstance(mat[i][i], float) and math.isnan(mat[i][i])) else None
+        perf_rows.append({
+            "task_idx": i+1,
+            "task_name": ti,
+            "train_time_sec": "",  # desconocido en reevaluación
+            "cuda_mem_peak_mb": "",
+            "batch_size": bs, "amp": bool(optim["amp"] and torch.cuda.is_available()),
+            "encoder": encoder, "T": T, "epochs_done": "",
+            "test_mae": test_mae, "final_mae": final_mae,
+        })
+
+    _safe_write(out_dir / "per_task_perf.json", perf_rows)
+    perf_csv_h = ["task_idx","task_name","train_time_sec","cuda_mem_peak_mb","batch_size",
+                  "amp","encoder","T","epochs_done","test_mae","final_mae"]
+    lines = [",".join(perf_csv_h)]
+    for r in perf_rows:
+        lines.append(",".join([str(r.get(k,"")) for k in perf_csv_h]))
+    (out_dir / "per_task_perf.csv").write_text("\n".join(lines), encoding="utf-8")
+
+    if verbose:
+        print(f"[OK] Reevaluación escrita en: {out_dir}")
+    return out_dir
+
+
+# === Re-evaluación "offline" de un run ya entrenado ==========================
+# Reconstruye eval_matrix.json/csv y forgetting.json a partir de continual_results.json.
+# También actualiza run_row.json (c2_final_mae, avg_forget_rel) si estaban vacíos.
+
+from pathlib import Path as _Path
+import json as _json
+import math as _math
+
+def _safe_json_read(_p: _Path) -> dict:
+    if not _p.exists():
+        return {}
+    try:
+        with _p.open("r", encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+def reevaluate_only(out_dir: str | _Path, verbose: bool = True):
+    out_dir = _Path(out_dir)
+    res_path = out_dir / "continual_results.json"
+    if not res_path.exists():
+        if verbose:
+            print(f"[SKIP] {out_dir.name}: no existe continual_results.json")
+        return
+
+    # 1) Cargar resultados y reconstruir matriz
+    results = _safe_json_read(res_path)
+    if not isinstance(results, dict) or not results:
+        if verbose:
+            print(f"[SKIP] {out_dir.name}: continual_results.json vacío")
+        return
+
+    names, mat = _build_eval_matrix(results)  # ya definido arriba en runner.py
+    if not names or not mat:
+        if verbose:
+            print(f"[SKIP] {out_dir.name}: no se pudo reconstruir la matriz")
+        return
+
+    # 2) Guardar eval_matrix.json / csv (sobrescribe si existían a medias)
+    eval_mat = {"tasks": names, "mae_matrix": mat}
+    _safe_write(out_dir / "eval_matrix.json", eval_mat)
+
+    header = ["task"] + [f"after_{n}" for n in names]
+    csv_lines = [",".join(header)]
+    for i, ti in enumerate(names):
+        row_vals = []
+        for v in mat[i]:
+            if v is None or (isinstance(v, float) and _math.isnan(v)):
+                row_vals.append("")
+            else:
+                try:
+                    row_vals.append(f"{float(v):.6f}")
+                except Exception:
+                    row_vals.append("")
+        csv_lines.append(",".join([ti, *row_vals]))
+    (out_dir / "eval_matrix.csv").write_text("\n".join(csv_lines), encoding="utf-8")
+
+    # 3) Guardar forgetting.json
+    forgetting = _compute_forgetting(names, mat)  # ya definido arriba en runner.py
+    _safe_write(out_dir / "forgetting.json", forgetting)
+
+    # 4) Actualizar run_row.json (c2_final_mae / avg_forget_rel)
+    rr_path = out_dir / "run_row.json"
+    rr = _safe_json_read(rr_path)
+    # calcular c2_final_mae
+    c2_name = _pick_c2_name(names) or (names[-1] if names else None)
+    c2_final = None
+    if c2_name is not None:
+        i = names.index(c2_name)
+        row = mat[i]
+        # último valor finito de la fila
+        last = None
+        for v in row[::-1]:
+            try:
+                fv = float(v)
+                if _math.isfinite(fv):
+                    last = fv
+                    break
+            except Exception:
+                pass
+        c2_final = last
+
+    # calcular avg_forget_rel desde forgetting
+    avg_forget_rel = None
+    try:
+        vals = []
+        for k, d in forgetting.items():
+            if isinstance(d, dict):
+                v = d.get("forget_rel", None)
+                if v is not None and _math.isfinite(float(v)):
+                    vals.append(float(v))
+        if vals:
+            avg_forget_rel = sum(vals) / len(vals)
+    except Exception:
+        pass
+
+    # escribir de vuelta (sin pisar otros campos)
+    if "exp" not in rr:
+        rr["exp"] = out_dir.name
+    if "preset" not in rr or rr["preset"] in (None, ""):
+        eff = _safe_json_read(out_dir / "efficiency_summary.json")
+        if eff:
+            rr["preset"] = eff.get("preset")
+            rr["method"] = eff.get("method")
+            rr["encoder"] = eff.get("encoder")
+            rr["model"] = eff.get("model")
+            rr["seed"] = eff.get("seed")
+
+    if c2_final is not None:
+        rr["c2_final_mae"] = c2_final
+    if avg_forget_rel is not None:
+        rr["avg_forget_rel"] = avg_forget_rel
+
+    _safe_write(rr_path, rr)
+
+    # CSV espejo mínimo (opcional)
+    try:
+        (out_dir / "run_row.csv").write_text(
+            "exp,preset,method,encoder,model,seed,c2_final_mae,avg_forget_rel,emissions_kg,elapsed_sec\n"
+            + ",".join([
+                str(rr.get("exp","")),
+                str(rr.get("preset","")),
+                str(rr.get("method","")),
+                str(rr.get("encoder","")),
+                str(rr.get("model","")),
+                str(rr.get("seed","")),
+                "" if rr.get("c2_final_mae")   is None else f"{float(rr['c2_final_mae']):.8f}",
+                "" if rr.get("avg_forget_rel") is None else f"{float(rr['avg_forget_rel']):.8f}",
+                "" if rr.get("emissions_kg")   is None else f"{float(rr['emissions_kg']):.6f}",
+                "" if rr.get("elapsed_sec")    is None else f"{float(rr['elapsed_sec']):.3f}",
+            ]),
+            encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+    if verbose:
+        print(f"[OK] Reevaluado: {out_dir.name} — eval_matrix/forgetting/run_row actualizados")
