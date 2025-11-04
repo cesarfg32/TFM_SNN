@@ -1,25 +1,25 @@
-# src/datasets.py
 # -*- coding: utf-8 -*-
-"""Datasets y transformaciones para el TFM (Udacity → SNN).
+"""
+Datasets y transformaciones para el TFM (Udacity → SNN).
 
-Novedades:
-- Ruta rápida con OpenCV para decodificar/resize (más veloz).
-- Fallback a PIL si no hay OpenCV o falla la lectura.
+Novedades clave en esta versión:
+- Soporte automático de rutas bajo processed para muestras offline balanceadas:
+  * Si la columna 'center' empieza por 'aug/...', se resuelven rutas bajo
+    el directorio 'processed/<run>' (deducido de csv_path.parent).
+  * Si empieza por 'IMG/...', se resuelven bajo 'raw/<run>' (base_dir).
+- Ruta rápida con OpenCV para decodificar/resize (más veloz) + fallback a PIL.
 - Augmentación opcional (flip con corrección, brillo, gamma, ruido).
-- **Respeto estricto de `to_gray`**: si el transform va en gris ⇒ 1 canal; si va en color ⇒ 3 canales.
-
-Puntos clave:
-- Lee CSVs (center/left/right o path/image) del simulador Udacity.
-- Preprocesa imágenes (crop top opcional, resize, normalización [0,1], gris opcional).
-- Codifica a impulsos on-the-fly:
-  - 'rate': Bernoulli por píxel ~ intensidad*gain
-  - 'latency': 1 spike; más brillo ⇒ antes (t menor)
+- Respeto estricto de `to_gray`: si el transform va en gris ⇒ 1 canal; si va en color ⇒ 3 canales.
+- Codificación a impulsos on-the-fly:
+    - 'rate': Bernoulli por píxel ~ intensidad*gain
+    - 'latency': 1 spike; más brillo ⇒ antes (t menor)
 - Devuelve tensores (T, C, H, W). C=1 si gris, C=3 si color.
 """
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
+
 import random
 import math
 import numpy as np
@@ -36,10 +36,11 @@ try:
     except Exception:
         pass
 except Exception:
-    cv2 = None
+    cv2 = None  # type: ignore
     _HAS_CV2 = False
 
 from PIL import Image
+
 
 # -----------------------------
 # Transformación de imagen
@@ -61,6 +62,7 @@ class ImageTransform:
     def __call__(self, img_bgr: np.ndarray) -> torch.Tensor:
         if img_bgr is None:
             raise ValueError("Imagen inválida (None).")
+
         # Crop superior
         if isinstance(self.crop_top, int) and self.crop_top > 0:
             img_bgr = img_bgr[self.crop_top:, ...]
@@ -104,6 +106,7 @@ class ImageTransform:
             arr = np.transpose(arr, (2, 0, 1))  # (3,h,w)
         return torch.from_numpy(arr)
 
+
 # -----------------------------
 # Augmentación de imagen/label
 # -----------------------------
@@ -114,13 +117,13 @@ class AugmentConfig:
     brightness: Optional[Tuple[float, float]] = None
     contrast:   Optional[Tuple[float, float]] = None
     saturation: Optional[Tuple[float, float]] = None
-    hue:        Optional[Tuple[float, float]] = None   # en radianes aprox. [-0.1, 0.1]~±5.7°
+    hue:        Optional[Tuple[float, float]] = None   # radianes aprox. [-0.1, 0.1] ~ ±5.7°
     gamma:      Optional[Tuple[float, float]] = None
     noise_std:  float = 0.0
 
 
 # -----------------------------
-# Codificadores (CPU, para usar en Dataset si hace falta)
+# Codificadores (CPU)
 # -----------------------------
 def encode_rate(x_img: torch.Tensor, T: int, gain: float) -> torch.Tensor:
     if x_img.dim() == 2:
@@ -129,6 +132,7 @@ def encode_rate(x_img: torch.Tensor, T: int, gain: float) -> torch.Tensor:
     pT = p.unsqueeze(0).expand(T, *p.shape).contiguous()
     rnd = torch.rand_like(pT)
     return (rnd < pT).float()
+
 
 def encode_latency(x_img: torch.Tensor, T: int) -> torch.Tensor:
     if x_img.dim() == 2:
@@ -144,6 +148,7 @@ def encode_latency(x_img: torch.Tensor, T: int) -> torch.Tensor:
         spikes[t_coords, c_idx, h_idx, w_idx] = 1.0
     return spikes
 
+
 # -----------------------------
 # Dataset Udacity
 # -----------------------------
@@ -154,8 +159,19 @@ class UdacityCSVConfig:
     gain: float = 0.5
     camera: str = "center"  # 'center' | 'left' | 'right'
 
+
 class UdacityCSV(Dataset):
-    """Dataset basado en CSV de Udacity."""
+    """Dataset basado en CSV de Udacity con soporte 'aug/' (processed) y 'IMG/' (raw).
+
+    Resolución de rutas:
+      - Si center empieza por 'aug/...':   se busca bajo processed/<run> (csv_path.parent).
+      - Si center empieza por 'IMG/...':  se busca bajo raw/<run> (base_dir).
+      - En cualquier otro caso:           base_dir / path (compatibilidad).
+
+    Esto permite:
+      * Entrenar con splits canónicos que referencian 'IMG/...'
+      * Entrenar con splits balanceados offline que referencian 'aug/...'
+    """
     def __init__(
         self,
         csv_path: Path,
@@ -169,7 +185,8 @@ class UdacityCSV(Dataset):
     ):
         super().__init__()
         self.csv_path = Path(csv_path)
-        self.base_dir = Path(base_dir)
+        self.base_dir_raw = Path(base_dir)
+        self.base_dir_proc = self.csv_path.parent  # processed/<run>
         self.cfg = UdacityCSVConfig(encoder=encoder, T=int(T), gain=float(gain), camera=camera)
         self.aug = aug
         self.tfm = tfm if tfm is not None else ImageTransform(200, 66, True, None)
@@ -208,17 +225,16 @@ class UdacityCSV(Dataset):
         raise KeyError(f"No encuentro columna de etiqueta (steering/angle/y) en {self.csv_path}")
 
     def _resolve_path(self, raw_path: str) -> str:
-        p = Path(str(raw_path).replace("\\", "/"))
-        if p.is_absolute():
-            parts = [q for q in p.parts]
-            if "IMG" in parts:
-                idx = parts.index("IMG")
-                p = Path(*parts[idx:])
-            else:
-                return str(self.base_dir / "IMG" / p.name)
-        if len(p.parts) >= 1 and p.parts[0] == "IMG":
-            return str(self.base_dir / p)
-        return str((self.base_dir / p).resolve())
+        """Resuelve rutas relativas a raw o processed según prefijo."""
+        p = Path(str(raw_path).replace("\\", "/")).as_posix().lstrip("/")
+        if p.lower().startswith("aug/"):
+            # processed/<run>/aug/...
+            return str((self.base_dir_proc / p).resolve())
+        # IMG/... u otra cosa → usar raw
+        q = Path(p)
+        if len(q.parts) >= 1 and q.parts[0].lower() == "img":
+            return str((self.base_dir_raw / q).resolve())
+        return str((self.base_dir_raw / q).resolve())
 
     # ---------- carga de imagen ----------
     def _load_image(self, path: str, as_gray: bool | None = None) -> np.ndarray:
@@ -243,8 +259,8 @@ class UdacityCSV(Dataset):
     def _encode(self, x_img: torch.Tensor) -> torch.Tensor:
         enc = self.cfg.encoder.lower()
         if enc == "image":
-            # Devolver 4D (B,C,H,W) a nivel de batch; aquí solo devolvemos (C,H,W)
-            return x_img  # sin temporal
+            # Devolver (C,H,W); el runner activará encode_runtime si procede
+            return x_img
         elif enc == "rate":
             return encode_rate(x_img, self.cfg.T, self.cfg.gain)
         elif enc == "latency":
@@ -271,36 +287,36 @@ class UdacityCSV(Dataset):
         if self.aug.contrast is not None:
             lo, hi = self.aug.contrast
             c = float(random.uniform(float(lo), float(hi)))
-            mean = x_img.mean(dim=(1,2), keepdim=True)
+            mean = x_img.mean(dim=(1, 2), keepdim=True)
             x_img = ((x_img - mean) * c + mean).clamp_(0.0, 1.0)
 
         # saturación/hue: solo si RGB (C=3)
         if (self.aug.saturation is not None or self.aug.hue is not None) and x_img.shape[0] == 3:
             # RGB -> YUV (aprox)
             R, G, B = x_img[0], x_img[1], x_img[2]
-            Y = 0.299*R + 0.587*G + 0.114*B
-            U = 0.492*(B - Y)
-            V = 0.877*(R - Y)
+            Y = 0.299 * R + 0.587 * G + 0.114 * B
+            U = 0.492 * (B - Y)
+            V = 0.877 * (R - Y)
 
-            # saturación: escala U,V
+            # saturación
             if self.aug.saturation is not None:
                 lo, hi = self.aug.saturation
                 s = float(random.uniform(float(lo), float(hi)))
                 U = U * s
                 V = V * s
 
-            # hue: rotación en el plano (U,V)
+            # hue (rotación en plano UV)
             if self.aug.hue is not None:
                 lo, hi = self.aug.hue
                 theta = float(random.uniform(float(lo), float(hi)))
                 cos_t = math.cos(theta); sin_t = math.sin(theta)
-                U_, V_ = U*cos_t - V*sin_t, U*sin_t + V*cos_t
+                U_, V_ = U * cos_t - V * sin_t, U * sin_t + V * cos_t
                 U, V = U_, V_
 
             # YUV -> RGB (aprox inversa)
-            R2 = (Y + 1.14*V).clamp(0.0, 1.0)
-            B2 = (Y + 2.032*U).clamp(0.0, 1.0)
-            G2 = (Y - 0.395*U - 0.581*V).clamp(0.0, 1.0)
+            R2 = (Y + 1.14 * V).clamp(0.0, 1.0)
+            B2 = (Y + 2.032 * U).clamp(0.0, 1.0)
+            G2 = (Y - 0.395 * U - 0.581 * V).clamp(0.0, 1.0)
             x_img = torch.stack([R2, G2, B2], dim=0)
 
         # gamma
@@ -327,6 +343,7 @@ class UdacityCSV(Dataset):
 
     def __getitem__(self, idx: int):
         img_path, y = self.samples[idx]
+        # Detectar si queremos cargar en gris/color según la tfm
         img_arr = self._load_image(img_path, as_gray=self.tfm.to_gray)
         x_img = self.tfm(img_arr).float()
 
@@ -347,49 +364,46 @@ class UdacityCSV(Dataset):
         y_t = torch.tensor([y], dtype=torch.float32)
         return X, y_t
 
+
 # Dataset para H5 con spikes offline
 import h5py
+
 
 class H5SpikesDataset(Dataset):
     """
     Lee archivos H5 con estructura:
       - Atributos: T, encoder, (gain), size_wh, to_gray
-      - Datasets:  'spikes'   (N, T, H, W)  o (N, T, C, H, W)
-                   'steering' (N,)
+      - Datasets:
+         'spikes'   (N, T, H, W)  o (N, T, C, H, W)
+         'steering' (N,)
     Devuelve: (x, y) con x -> (T, C, H, W) float32, y -> tensor([float32])
     """
     def __init__(self, h5_path: Path | str):
         super().__init__()
         self.h5_path = str(h5_path)
-        # NO abrimos el fichero para uso persistente en el padre
-        # Solo leemos N una vez y cerramos inmediatamente (seguro para el fork)
         with h5py.File(self.h5_path, "r", libver="latest", swmr=True) as f:
             ds = f["spikes"]
             self._N = int(ds.shape[0])
 
-        # Handles perezosos (solo en el worker)
         self._h5 = None
         self._spikes = None
         self._steer = None
 
     def _ensure_open(self):
         if self._h5 is None:
-            # Abrir por worker (cada proceso tendrá su propio handle)
-            # Bloqueo desactivado para evitar problemas en WSL2
             self._h5 = h5py.File(self.h5_path, "r", libver="latest", swmr=True)
             self._spikes = self._h5["spikes"]
             self._steer  = self._h5["steering"]
 
     def __len__(self):
-        # No abre el fichero; solo devuelve el tamaño ya leído
         return self._N
 
     def __getitem__(self, i: int):
         self._ensure_open()
         x = self._spikes[i]  # (T,H,W) o (T,C,H,W)
-        if x.ndim == 3:      # (T,H,W) -> (T,1,H,W)
+        if x.ndim == 3:
             x = x[None, ...]           # (1,T,H,W)
-            x = x.transpose(1, 0, 2, 3) # (T,1,H,W)
+            x = x.transpose(1, 0, 2, 3)  # (T,1,H,W)
         x_t = torch.from_numpy(x)
         if x_t.dtype == torch.uint8:
             x_t = x_t.float()
@@ -398,7 +412,6 @@ class H5SpikesDataset(Dataset):
         return x_t, y_t
 
     def __getstate__(self):
-        # Evita heredar handles HDF5 al fork
         d = self.__dict__.copy()
         d["_h5"] = None
         d["_spikes"] = None

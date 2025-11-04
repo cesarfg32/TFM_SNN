@@ -1,4 +1,4 @@
-# --- runner.py (COMPLETO) ---
+# --- runner.py ---
 from __future__ import annotations
 from pathlib import Path
 import sys, json, torch, math, os, time as _time, logging, platform, gc
