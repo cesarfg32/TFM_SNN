@@ -139,6 +139,9 @@ class SCA_SNN:
         self._T_seq: int = int(self.cfg.T or 1)
         self._need_grad_hook: bool = True
 
+        # Nuevo: suspender el gating durante la recogida de anclas
+        self._suspend_mask: bool = False
+
     # -------- pre-forward: detectar T --------
     def _model_pre_forward_hook(self, module: nn.Module, inputs: Tuple[torch.Tensor, ...]):
         if not inputs:
@@ -159,9 +162,13 @@ class SCA_SNN:
         if not torch.is_tensor(out) or self._N is None or self._R is None:
             return out
 
+        # Si estamos recogiendo anclas, no aplicar máscara (evita sesgo/circularidad)
+        if self._suspend_mask:
+            return out
+
         # Normaliza forma y aplica máscara
         yTBN, orig, need_back = _to_TBN(out, self._T_seq, self.cfg.flatten_spatial)
-        T, B, N = yTBN.shape
+        _, _, N = yTBN.shape
         if N != self._N:
             dev_target = self._ensure_target_device()
             self._setup_per_neuron_state(N, device=dev_target)
@@ -391,6 +398,7 @@ class SCA_SNN:
         self._attached_name = getattr(target, "__class__", type(target)).__name__
         dev_target = self._ensure_target_device()
 
+        # Probe para dimensionar N
         with torch.no_grad():
             try:
                 xb, _ = next(iter(train_loader))
@@ -406,14 +414,10 @@ class SCA_SNN:
             _ = model(xb)
             h.remove()
 
-        if self._hook_handle is None:
-            self._hook_handle = target.register_forward_hook(self._forward_hook, with_kwargs=False)
-
-        if self._need_grad_hook and hasattr(target, "weight") and isinstance(target.weight, torch.Tensor):
-            self._w_grad_hook = target.weight.register_hook(self._weight_grad_hook)
-            self._need_grad_hook = False
-
+        # Recoge anclas del task SIN aplicar máscara
+        self._suspend_mask = True
         anchors_curr = self._collect_anchors_for_task(model, train_loader, dev_target)
+        self._suspend_mask = False
         self._sim_min = self._estimate_similarity_min(anchors_curr)
 
         print(f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
@@ -423,6 +427,14 @@ class SCA_SNN:
                   f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
                   f"habit_decay={self.cfg.habit_decay}")
 
+        # Activa el hook de gating a partir de ahora (entrenamiento)
+        if self._hook_handle is None:
+            self._hook_handle = target.register_forward_hook(self._forward_hook, with_kwargs=False)
+
+        if self._need_grad_hook and hasattr(target, "weight") and isinstance(target.weight, torch.Tensor):
+            self._w_grad_hook = target.weight.register_hook(self._weight_grad_hook)
+            self._need_grad_hook = False
+
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
         try:
             _ = self.penalty()  # decay + reset Gacc
@@ -431,7 +443,11 @@ class SCA_SNN:
         if self._target is None or self._N is None:
             return
         dev_target = self._ensure_target_device()
+
+        # Recoge y guarda anclas del task SIN aplicar máscara
+        self._suspend_mask = True
         anchors = self._collect_anchors_for_task(model, train_loader, dev_target)
+        self._suspend_mask = False
         self._anchors_prev.append(anchors.detach().clone())
 
         if self._R is not None and self._N:
@@ -463,6 +479,7 @@ class SCA_SNN:
         self._N = None
         self._R = None
         self._Gacc = None
+        self._suspend_mask = False  # reset de seguridad
 
     # introspección
     def get_state(self) -> Dict[str, float]:
