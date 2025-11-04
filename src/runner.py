@@ -622,7 +622,7 @@ def run_continual(
 # =========================================================
 # NUEVO: Reevaluación SOLO-EVAL de un run ya entrenado
 # =========================================================
-def reevaluate_only(
+def reevaluate_from_checkpoints(
     out_dir: Path | str,
     task_list: list[dict],
     make_loader_fn,
