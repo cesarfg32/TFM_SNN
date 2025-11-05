@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
+# src/loader.py
 """
 Utilidades comunes del proyecto TFM_SNN.
 
 Novedades:
-- Opción de balanceo por bins de 'steering' en el split de entrenamiento usando
-  WeightedRandomSampler (reduce el sesgo a rectas).
-- Opción de pasar configuración de augmentación para el split de entrenamiento.
-- Carga H5 con collate top-level picklable (evita errores "Can't pickle local object ...").
+- Balanceo por bins de 'steering' en train mediante WeightedRandomSampler.
+- Augment configurable en el split de entrenamiento.
+- Carga H5 con collate top-level picklable (evita "Can't pickle local object ...").
 - Propaga drop_last, pin_memory_device y timeout a DataLoader (CSV/H5).
 - Soporte para multiprocessing_context (útil en WSL/Linux con CUDA).
+- Factory que elige H5 offline o CSV + runtime encode de forma coherente con los presets.
 
 Retrocompatibilidad:
 - Si NO activas 'balance_train' ni pasas 'aug_train', todo se comporta como antes.
@@ -38,8 +39,8 @@ def set_seeds(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    # Si quisieras forzar determinismo total (más lento):
-    # torch.backends.cudnn.deterministic = True
+    # Para determinismo total (más lento):
+    # torch.use_deterministic_algorithms(True)
     # torch.backends.cudnn.benchmark = False
 
 
@@ -86,7 +87,6 @@ def _make_balanced_sampler(
 
     # id de bin por muestra
     bin_ids = np.clip(np.digitize(y, edges) - 1, 0, len(edges) - 2)
-
     # pesos inversos por bin
     counts = np.bincount(bin_ids, minlength=len(edges) - 1).astype(np.float32)
     counts = counts + float(smooth_eps)
@@ -120,7 +120,7 @@ def make_loaders_from_csvs(
     balance_train: bool = False,
     balance_bins: int = 21,
     balance_smooth_eps: float = 1e-3,
-    # Nuevos flags coherentes con runner.py
+    # Flags coherentes con runner.py
     drop_last_train: bool = True,
     pin_memory_device: str = "cuda",
     timeout: int = 0,
@@ -177,6 +177,7 @@ def make_loaders_from_csvs(
         timeout=int(timeout),
         pin_memory_device=str(pin_memory_device),
     )
+
     common = dict(
         batch_size=batch_size,
         shuffle=False,
@@ -228,11 +229,11 @@ def _pick_h5_by_attrs(
     for f in candidates:
         try:
             with h5py.File(f, "r") as h5:
-                enc   = str(h5.attrs.get("encoder", "rate")).lower()
-                T_h   = int(h5.attrs.get("T", want_T))
-                size  = tuple(int(x) for x in h5.attrs.get("size_wh", want_size))
-                to_g  = bool(h5.attrs.get("to_gray", 1))
-                gain_h= float(h5.attrs.get("gain", 0.0))
+                enc  = str(h5.attrs.get("encoder", "rate")).lower()
+                T_h  = int(h5.attrs.get("T", want_T))
+                size = tuple(int(x) for x in h5.attrs.get("size_wh", want_size))
+                to_g = bool(h5.attrs.get("to_gray", 1))
+                gain_h = float(h5.attrs.get("gain", 0.0))
                 ok = (enc == want_enc) and (T_h == want_T) and (size == want_size) and (to_g == want_gray)
                 if enc == "rate":
                     ok = ok and (abs(gain_h - want_gain) < 1e-8)
@@ -262,8 +263,8 @@ def make_loaders_from_h5(
     pin_memory: bool = True,
     persistent_workers: bool = True,
     prefetch_factor: Optional[int] = 2,
-    multiprocessing_context: Any = None,   # opcional: para pasar mp_ctx desde runner
-    # Nuevos flags coherentes con runner.py
+    multiprocessing_context: Any = None,   # opcional: pasar mp_ctx desde runner
+    # Flags coherentes con runner.py
     drop_last_train: bool = True,
     pin_memory_device: str = "cuda",
     timeout: int = 0,
@@ -327,8 +328,8 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
         "num_workers", "pin_memory", "persistent_workers", "prefetch_factor",
         "shuffle_train", "aug_train",
         "balance_train", "balance_bins", "balance_smooth_eps",
-        "multiprocessing_context",             # <- pasar mp_ctx desde runner
-        "drop_last", "pin_memory_device", "timeout",  # <- NUEVO
+        "multiprocessing_context",              # <- pasar mp_ctx desde runner
+        "drop_last", "pin_memory_device", "timeout",   # <- NUEVO
     }
 
     def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
@@ -431,7 +432,7 @@ def build_components_for(cfg: dict, root: Path):
         int(cfg["model"]["img_w"]),
         int(cfg["model"]["img_h"]),
         to_gray=bool(cfg["model"]["to_gray"]),
-        crop_top=None
+        crop_top=None,
     )
 
     # --- Loader factory base ---
@@ -450,7 +451,7 @@ def build_components_for(cfg: dict, root: Path):
         balance_train=bool(cfg["data"].get("balance_online", False)),
         balance_bins=int(cfg["data"].get("balance_bins") or 50),
         balance_smooth_eps=float(cfg["data"].get("balance_smooth_eps") or 1e-3),
-        # Estos 3 se añaden para alinear con runner.py
+        # Alineado con runner.py
         drop_last=True,
         pin_memory_device=str(cfg["data"].get("pin_memory_device", "cuda")),
         timeout=int(cfg["data"].get("timeout", 0)),

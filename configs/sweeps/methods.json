@@ -1,68 +1,6 @@
 {
   "exps": [
     {
-      "method": "sca-snn",
-      "params": {
-        "attach_to": "f6",
-        "flatten_spatial": false,
-        "num_bins": 50,
-        "anchor_batches": 16,
-        "beta": 0.55,
-        "bias": 0.0,
-        "soft_mask_temp": 0.3,
-        "verbose": false,
-        "log_every": 65536
-      },
-      "tag": "sca_looser_b055_bias000_t030_ab16"
-    },
-    {
-      "method": "sca-snn",
-      "params": {
-        "attach_to": "f6",
-        "flatten_spatial": false,
-        "num_bins": 80,
-        "anchor_batches": 16,
-        "beta": 0.65,
-        "bias": 0.05,
-        "soft_mask_temp": 0.0,
-        "verbose": false,
-        "log_every": 65536
-      },
-      "tag": "sca_hard_b065_bias005_t000_bins80"
-    },
-    {
-      "method": "sca-snn",
-      "params": {
-        "attach_to": "f6",
-        "flatten_spatial": false,
-        "num_bins": 50,
-        "anchor_batches": 24,
-        "beta": 0.60,
-        "bias": 0.10,
-        "soft_mask_temp": 0.50,
-        "verbose": false,
-        "log_every": 65536
-      },
-      "tag": "sca_moreanchors_b060_bias010_t050_ab24"
-    },
-
-    {
-      "method": "sa-snn",
-      "params": {
-        "attach_to": "f6",
-        "k": 8,
-        "tau": 28.0,
-        "th_min": 1.0,
-        "th_max": 2.0,
-        "p": 2000000,
-        "vt_scale": 1.0,
-        "flatten_spatial": false,
-        "assume_binary_spikes": false,
-        "reset_counters_each_task": false
-      },
-      "tag": "sa_ref_k8_tau28_p2m"
-    },
-    {
       "method": "sa-snn",
       "params": {
         "attach_to": "f6",
@@ -78,39 +16,6 @@
       },
       "tag": "sa_k6_tau24_vt1p2"
     },
-    {
-      "method": "sa-snn",
-      "params": {
-        "attach_to": "f6",
-        "k": 10,
-        "tau": 32.0,
-        "th_min": 1.0,
-        "th_max": 2.0,
-        "p": 5000000,
-        "vt_scale": 1.0,
-        "flatten_spatial": false,
-        "assume_binary_spikes": false,
-        "reset_counters_each_task": false
-      },
-      "tag": "sa_k10_tau32_p5m"
-    },
-    {
-      "method": "sa-snn",
-      "params": {
-        "attach_to": "f6",
-        "k": 8,
-        "tau": 28.0,
-        "th_min": 1.0,
-        "th_max": 2.0,
-        "p": 2000000,
-        "vt_scale": 1.0,
-        "flatten_spatial": true,
-        "assume_binary_spikes": false,
-        "reset_counters_each_task": false
-      },
-      "tag": "sa_k8_tau28_flatten"
-    },
-
     {
       "method": "as-snn",
       "params": {

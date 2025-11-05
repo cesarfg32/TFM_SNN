@@ -14,13 +14,10 @@ from tqdm import tqdm
 
 from .utils import set_seeds  # reproducibilidad global
 
+# Rendimiento: TF32 permitido y benchmark ON si el input shape es estable
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-# Para resultados finales reproducibles mejor dejarlo en False;
-# si quieres exprimir velocidad durante HPO, puedes poner True:
-# torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.benchmark = True
-
 
 # ---------------------------------------------------------------------
 # Runtime encode: permite que el DataLoader entregue 4D (B,C,H,W)
@@ -59,27 +56,27 @@ def _align_target_shape(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return y.squeeze(1)
     return y
 
-
 # ------------------------- Runtime encoding --------------------------
 @torch.no_grad()
 def _maybe_runtime_encode(x4: torch.Tensor) -> torch.Tensor | None:
     """
     Si _RUNTIME_ENC['mode'] está activo y x es 4D (B,C,H,W), devuelve un tensor 5D (T,B,C,H,W)
-    codificado en el device actual. Si no aplica, devuelve None.
+    codificado en el device objetivo. Si no aplica, devuelve None.
     """
     enc = _RUNTIME_ENC
     mode, T, gain = enc.get("mode"), enc.get("T"), enc.get("gain")
     if mode is None or T is None or x4.ndim != 4:
         return None
 
-    dev = x4.device
+    # Usa el device objetivo configurado (fallback a CUDA si existe)
+    target_dev = enc.get("device") or (torch.device("cuda") if torch.cuda.is_available() else x4.device)
 
-    # Normaliza a [0,1] con el orden correcto de argumentos en .to(...)
+    # Mover ANTES de generar aleatorios/expandir
     if x4.dtype == torch.uint8:
-        x = x4.to(device=dev, dtype=torch.float32) / 255.0
+        x = x4.to(device=target_dev, dtype=torch.float32, non_blocking=True) / 255.0
     else:
-        x = x4.to(device=dev, dtype=torch.float32)
-        # Si parece estar en 0..255 en float, escala; si no, sólo clamp
+        x = x4.to(device=target_dev, dtype=torch.float32, non_blocking=True)
+        # Si parece estar en 0..255 en float, escala; si no, clamp
         x_max = float(torch.nan_to_num(x.detach().max(), nan=0.0).item()) if x.numel() > 0 else 1.0
         if x_max > 1.5:
             x = x / 255.0
@@ -92,7 +89,7 @@ def _maybe_runtime_encode(x4: torch.Tensor) -> torch.Tensor | None:
 
     if m == "rate":
         p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
-        r = torch.rand((T, *x.shape), device=dev)
+        r = torch.rand((T, *x.shape), device=target_dev)
         spikes = (r < p.unsqueeze(0)).to(torch.float32)
         return spikes.contiguous()
 
@@ -101,8 +98,8 @@ def _maybe_runtime_encode(x4: torch.Tensor) -> torch.Tensor | None:
         p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
         t_fire = torch.round((1.0 - p) * float(max(T - 1, 0))).to(torch.long)  # (B,C,H,W)
         N = t_fire.numel()
-        spikes = torch.zeros((T, N), device=dev, dtype=torch.float32)
-        ones = torch.ones((1, N), device=dev, dtype=torch.float32)
+        spikes = torch.zeros((T, N), device=target_dev, dtype=torch.float32)
+        ones = torch.ones((1, N), device=target_dev, dtype=torch.float32)
         spikes.scatter_(0, t_fire.view(1, -1), ones)  # coloca 1 en el instante t_fire por píxel
         spikes = spikes.view(T, *x.shape).contiguous()
         return spikes
@@ -183,7 +180,6 @@ def _forward_with_cached_orientation(
     return y_hat
 
 
-
 # ---------------------------------------------------------------------
 # Configuración de entrenamiento
 # ---------------------------------------------------------------------
@@ -228,7 +224,7 @@ def train_supervised(
     use_amp = bool(cfg.amp and torch.cuda.is_available())
     scaler = GradScaler(enabled=use_amp)
 
-    # --- HISTORIA: añadimos val_mae y val_mse (mínimo impacto de rendimiento) ---
+    # --- HISTORIA: añadimos val_mae y val_mse ---
     history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_mse": []}
     t0 = time.time()
 
@@ -236,7 +232,7 @@ def train_supervised(
     patience_left = cfg.es_patience if (cfg.es_patience is not None and cfg.es_patience > 0) else None
     best_state = None
 
-    # Logging de it/s opcional vía env (no requiere parche externo)
+    # Logging de it/s opcional vía env
     LOG_ITPS = os.environ.get("TRAIN_LOG_ITPS", "0") == "1"
 
     # Hints de orientación (solo se resuelven una vez por fase)
@@ -254,8 +250,7 @@ def train_supervised(
         t_epoch0 = time.perf_counter()
 
         for x, y in tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.epochs}", leave=False):
-            # IMPORTANT: mueve 'y' explícitamente al device aquí también, para evitar
-            # que quede en CPU cuando se alinea contra y_hat:
+            # IMPORTANT: mueve 'y' explícitamente al device para evitar desbalances CPU/GPU
             y = y.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
@@ -275,7 +270,7 @@ def train_supervised(
             y_aligned = _align_target_shape(y_hat, y)
             y_aligned = y_aligned.to(device=y_hat.device, dtype=y_hat.dtype, non_blocking=True)
 
-            # Cálculo de pérdida base
+            # Pérdida base
             with autocast("cuda", enabled=use_amp):
                 loss_base = loss_fn(y_hat, y_aligned)
 

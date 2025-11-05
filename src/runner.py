@@ -1,4 +1,4 @@
-# --- runner.py ---
+# --- src/runner.py ---
 from __future__ import annotations
 from pathlib import Path
 import sys, json, torch, math, os, time as _time, logging, platform, gc
@@ -130,7 +130,7 @@ def _pick_c2_name(task_names: List[str]) -> str | None:
     return task_names[1] if len(task_names) >= 2 else (task_names[-1] if task_names else None)
 
 # -----------------------------
-# NUEVO: clonar loader con num_workers=0 para anclas (SCA)
+# Clonar loader con num_workers=0 para anclas (SCA)
 # -----------------------------
 def _to_single_worker_loader(loader: DataLoader) -> DataLoader:
     """Clona un DataLoader para uso *solo* en cálculo de anclas (SCA)."""
@@ -152,7 +152,7 @@ def _to_single_worker_loader(loader: DataLoader) -> DataLoader:
         return loader
 
 # -----------------------------
-# NUEVO: manifest por tarea (para plots robustos)
+# Manifest por tarea (para plots robustos)
 # -----------------------------
 def _write_task_manifest(task_dir: Path, meta: Dict[str, Any], history: Dict[str, Any]) -> None:
     payload = {
@@ -228,6 +228,18 @@ def run_continual(
     if mp_ctx is not None and dl_kwargs["num_workers"] > 0:
         dl_kwargs["multiprocessing_context"] = mp_ctx
 
+    # Log de configuración de DataLoader antes de construir loaders
+    if verbose:
+        print(
+            "[DL.cfg] workers={nw} pin={pm} persist={pw} prefetch={pf} pin_dev={pmd} | "
+            "encoder={enc} T={T} offline={off} B={bs}".format(
+                nw=dl_kwargs["num_workers"], pm=dl_kwargs["pin_memory"],
+                pw=dl_kwargs["persistent_workers"], pf=dl_kwargs["prefetch_factor"],
+                pmd=dl_kwargs.get("pin_memory_device", None),
+                enc=encoder, T=T, off=use_offline, bs=bs
+            )
+        )
+
     from src.datasets import AugmentConfig
     if data.get("aug_train"):
         dl_kwargs["aug_train"] = AugmentConfig(**data["aug_train"])
@@ -240,9 +252,20 @@ def run_continual(
         dl_kwargs["balance_smooth_eps"] = float(data.get("balance_smooth_eps", 1e-3))
 
     device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        try:
+            torch.cuda.set_device(0)
+            torch.backends.cudnn.benchmark = True
+        except Exception:
+            pass
+
     loss_fn = torch.nn.MSELoss()
-    model   = make_model_fn(tfm)
+    model   = make_model_fn(tfm).to(device)  # << subir a GPU aquí
     model_lbl = _model_label(model, tfm)
+    try:
+        print("[MODEL] device:", next(model.parameters()).device)
+    except Exception:
+        pass
 
     method = cont["method"].lower()
     method_kwargs = dict(cont.get("params", {}))
@@ -360,17 +383,44 @@ def run_continual(
                 task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
             )
 
-            # Decide encode runtime si NO hay offline spikes
+            # Log de loaders efectivos
+            if verbose:
+                def _dl_info(tag, dl: DataLoader):
+                    try:
+                        print(f"[DL.{tag}] workers={dl.num_workers} pin={dl.pin_memory} "
+                              f"persist={getattr(dl, 'persistent_workers', None)} "
+                              f"prefetch={getattr(dl, 'prefetch_factor', None)}")
+                    except Exception:
+                        print(f"[DL.{tag}] (sin introspección)")
+                _dl_info("train", tr)
+                _dl_info("val", va)
+                _dl_info("test", te)
+
+            # Decide encode runtime si NO hay offline spikes (dataset de imágenes => (B,C,H,W))
             xb_sample, _ = next(iter(tr))
             used_rt = False
+            if verbose:
+                try:
+                    xdev = getattr(xb_sample, "device", None)
+                    print(f"[DL.sample] X.shape={tuple(xb_sample.shape)} dtype={getattr(xb_sample, 'dtype', None)} device={xdev}")
+                except Exception:
+                    pass
             if (not use_offline) and xb_sample.ndim == 4:
                 set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
                 used_rt = True
                 if verbose: print("  runtime encode: ON (GPU)")
+            else:
+                if verbose and not use_offline:
+                    print("  runtime encode: OFF (dataset ya entrega spikes o no aplica)")
 
             # SOLO SCA: loader anclas single-worker
             is_sca = "sca-snn" in method_obj.name.lower() or "sca_snn" in method_obj.name.lower()
             tr_anchor = _to_single_worker_loader(tr) if is_sca else tr
+            if verbose and is_sca:
+                try:
+                    print(f"[SCA] anchor-loader workers={tr_anchor.num_workers} (forzado a 0)")
+                except Exception:
+                    print("[SCA] anchor-loader clonado")
 
             if hasattr(method_obj, "prepare_train_loader"):
                 tr = method_obj.prepare_train_loader(tr)
@@ -405,6 +455,12 @@ def run_continual(
                 if any(t in msg for t in triggers):
                     print("[WARN] DataLoader/WSL issue detectado. Reintento con num_workers=0…")
                     tr_safe = _to_single_worker_loader(tr)
+                    try:
+                        print(f"[DL.train(retry)] workers={tr_safe.num_workers} pin={tr_safe.pin_memory} "
+                              f"persist={getattr(tr_safe, 'persistent_workers', None)} "
+                              f"prefetch={getattr(tr_safe, 'prefetch_factor', None)}")
+                    except Exception:
+                        pass
                     history = train_supervised(
                         model, tr_safe, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
                     )
@@ -620,7 +676,7 @@ def run_continual(
 
 
 # =========================================================
-# NUEVO: Reevaluación SOLO-EVAL de un run ya entrenado
+# Reevaluación SOLO-EVAL de un run ya entrenado
 # =========================================================
 def reevaluate_from_checkpoints(
     out_dir: Path | str,
@@ -766,14 +822,14 @@ def reevaluate_only(out_dir: str | _Path, verbose: bool = True):
             print(f"[SKIP] {out_dir.name}: continual_results.json vacío")
         return
 
-    names, mat = _build_eval_matrix(results)  # ya definido arriba en runner.py
+    names, mat = _build_eval_matrix(results)
     if not names or not mat:
         if verbose:
             print(f"[SKIP] {out_dir.name}: no se pudo reconstruir la matriz")
         return
 
-    # 2) Guardar eval_matrix.json / csv (sobrescribe si existían a medias)
-    eval_mat = {"tasks": names, "mae_matrix": mat}
+    # 2) Guardar eval_matrix.json / csv (sin NaN -> None)
+    eval_mat = {"tasks": names, "mae_matrix": _nan_to_none_matrix(mat)}
     _safe_write(out_dir / "eval_matrix.json", eval_mat)
 
     header = ["task"] + [f"after_{n}" for n in names]
@@ -792,7 +848,7 @@ def reevaluate_only(out_dir: str | _Path, verbose: bool = True):
     (out_dir / "eval_matrix.csv").write_text("\n".join(csv_lines), encoding="utf-8")
 
     # 3) Guardar forgetting.json
-    forgetting = _compute_forgetting(names, mat)  # ya definido arriba en runner.py
+    forgetting = _compute_forgetting(names, mat)
     _safe_write(out_dir / "forgetting.json", forgetting)
 
     # 4) Actualizar run_row.json (c2_final_mae / avg_forget_rel)
