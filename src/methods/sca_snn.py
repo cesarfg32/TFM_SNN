@@ -16,7 +16,7 @@ class SCAConfig:
     flatten_spatial: bool = True
 
     # Similaridad (anchors)
-    num_bins: int = 21
+    num_bins: int = 50
     bin_lo: float = -1.0
     bin_hi: float =  1.0
     anchor_batches: int = 8
