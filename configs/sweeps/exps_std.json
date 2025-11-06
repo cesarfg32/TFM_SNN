@@ -1,0 +1,18 @@
+{
+  "exps": [
+    { "method": "ewc", "params": { "lam": 5000000, "fisher_batches": 200 }, "tag": "std_ewc_lam5e6_f200" },
+    { "method": "ewc", "params": { "lam": 5000000, "fisher_batches": 800 }, "tag": "std_ewc_lam5e6_f800" },
+
+    { "method": "sa-snn", "params": { "attach_to": "f6", "k": 0.15, "tau": 26.0, "vt_scale": 1.15, "th_min": 1.0, "th_max": 2.0, "p": 3000000, "flatten_spatial": false, "assume_binary_spikes": false, "reset_counters_each_task": false }, "tag": "std_sa_ratio15_tau26_vt1p15_p3m" },
+    { "method": "sa-snn", "params": { "attach_to": "f6", "k": 0.12, "tau": 22.0, "vt_scale": 1.20, "th_min": 1.0, "th_max": 2.0, "p": 2000000, "flatten_spatial": false, "assume_binary_spikes": false, "reset_counters_each_task": false }, "tag": "std_sa_ratio12_tau22_vt1p2_p2m" },
+
+    { "method": "as-snn", "params": { "measure_at": "input", "gamma_ratio": 0.35, "lambda_a": 0.9, "ema": 0.90, "do_synaptic_scaling": false }, "tag": "std_as_input_gr035_lam0p9" },
+    { "method": "as-snn", "params": { "measure_at": "both", "attach_to": "f6", "gamma_ratio": 0.40, "lambda_a": 1.2, "ema": 0.95, "do_synaptic_scaling": true, "scale_clip": [0.6, 1.8], "scale_bias": false, "penalty_mode": "l1" }, "tag": "std_as_both_gr040_lam1p2_scale" },
+
+    { "method": "sca-snn", "params": { "attach_to": "f6", "flatten_spatial": false, "num_bins": 60, "anchor_batches": 24, "bin_lo": -1.0, "bin_hi": 1.0, "max_per_bin": 1024, "beta": 0.52, "bias": 0.00, "soft_mask_temp": 0.70, "habit_decay": 0.99, "verbose": false, "log_every": 65536 }, "tag": "std_sca_bins60_b052_t070_ab24" },
+    { "method": "sca-snn", "params": { "attach_to": "f6", "flatten_spatial": false, "num_bins": 50, "anchor_batches": 16, "beta": 0.55, "bias": 0.00, "soft_mask_temp": 0.30, "verbose": false, "log_every": 65536 }, "tag": "std_sca_bins50_b055_t030_ab16" },
+
+    { "method": "rehearsal", "params": { "buffer_size": 3000, "replay_ratio": 0.10 }, "tag": "std_reh_buf3000_rr10" },
+    { "method": "rehearsal+ewc", "params": { "buffer_size": 3000, "replay_ratio": 0.10, "lam": 3000000, "fisher_batches": 200 }, "tag": "std_reh_buf3000_rr10+ewc_l3e6_f200" }
+  ]
+}

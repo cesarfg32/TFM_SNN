@@ -1,5 +1,5 @@
 # =====================
-# PRESETS TFM — SNN/CL
+# PRESETS TFM — SNN/CL (ACCURATE)
 # =====================
 
 # ---- Bloque base (anclas) ----
@@ -15,7 +15,7 @@ defaults: &defaults
     encoder: rate              # rate | latency | raw | image
     T: 10
     gain: 0.5
-    use_offline_spikes: true
+    use_offline_spikes: true   # H5 offline
     encode_runtime: false
 
     # Reproductibilidad / rendimiento (estable /dev/shm)
@@ -53,11 +53,11 @@ defaults: &defaults
     seed: 42
     # Balanceo offline de imágenes
     balance_offline:
-      mode: images          # images | none
+      mode: images           # images | none
       target_per_bin: auto
       cap_per_bin: 12000
       aug:
-        prob_hflip: 0.0     # desactivar flips en offline
+        prob_hflip: 0.0      # desactivar flips en offline
         brightness: [0.8, 1.2]
         contrast:   [0.8, 1.2]
         saturation: [0.8, 1.2]
@@ -86,7 +86,7 @@ defaults: &defaults
       lam: 1.0e9
       fisher_batches: 1000
 
-  # Control de logs
+  # Control de logs (mantengo como lo tenías)
   logging: &defaults_logging
     telemetry:
       codecarbon: true
@@ -115,55 +115,7 @@ defaults: &defaults
   naming: &defaults_naming
     tag: ""
 
-# ---- Presets ----
-
-fast:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 12
-    gain: 0.90
-  optim:
-    <<: *defaults_optim
-    lr: 6.0e-4
-    epochs: 12
-    batch_size: 320
-    es_patience: 2
-    es_min_delta: 7.5e-4
-    compile: true
-    compile_mode: reduce-overhead
-  continual:
-    <<: *defaults_continual
-  prep:
-    <<: *defaults_prep
-  logging:
-    <<: *defaults_logging
-  naming:
-    <<: *defaults_naming
-
-std:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 18
-    gain: 0.70
-  optim:
-    <<: *defaults_optim
-    lr: 5.0e-4
-    epochs: 16
-    batch_size: 256
-    es_patience: 3
-    es_min_delta: 5.0e-4
-    compile: false
-  continual:
-    <<: *defaults_continual
-  prep:
-    <<: *defaults_prep
-  logging:
-    <<: *defaults_logging
-  naming:
-    <<: *defaults_naming
-
+# ---- Preset ACCURATE ----
 accurate:
   <<: *defaults
   data:

@@ -177,9 +177,9 @@ class SASNN:
     def after_batch(self, model: nn.Module, batch, loss) -> None:
         pass
 
-    def penalty(self):
-        # SA-SNN no añade penalización al loss base
-        return 0.0
+    def penalty(self) -> torch.Tensor:
+        # SA-SNN no añade penalización al loss base, pero devolvemos Tensor en el device correcto
+        return torch.zeros((), dtype=torch.float32, device=self.device)
 
     def close(self) -> None:
         self.detach()

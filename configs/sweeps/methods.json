@@ -1,49 +1,78 @@
 {
   "exps": [
     {
-      "method": "sca-snn",
+      "method": "sa-snn+ewc",
       "params": {
         "attach_to": "f6",
+        "k": 0.15,
+        "tau": 26.0,
+        "vt_scale": 1.1,
+        "th_min": 1.0,
+        "th_max": 2.0,
+        "p": 3000000,
         "flatten_spatial": false,
-        "num_bins": 50,
-        "anchor_batches": 16,
-        "beta": 0.55,
-        "bias": 0.0,
-        "soft_mask_temp": 0.3,
-        "verbose": false,
-        "log_every": 65536
+        "assume_binary_spikes": false,
+        "reset_counters_each_task": false,
+
+        "lam": 3000000,
+        "fisher_batches": 200
       },
-      "tag": "sca_looser_b055_bias000_t030_ab16"
+      "tag": "sa_ratio15_tau26_vt1p1_p3m+ewc_lam3e6"
     },
     {
       "method": "sca-snn",
       "params": {
         "attach_to": "f6",
         "flatten_spatial": false,
-        "num_bins": 80,
-        "anchor_batches": 16,
-        "beta": 0.65,
-        "bias": 0.05,
-        "soft_mask_temp": 0.0,
-        "verbose": false,
-        "log_every": 65536
-      },
-      "tag": "sca_hard_b065_bias005_t000_bins80"
-    },
-    {
-      "method": "sca-snn",
-      "params": {
-        "attach_to": "f6",
-        "flatten_spatial": false,
+
         "num_bins": 50,
         "anchor_batches": 24,
-        "beta": 0.60,
-        "bias": 0.10,
-        "soft_mask_temp": 0.50,
+        "bin_lo": -1.0,
+        "bin_hi": 1.0,
+        "max_per_bin": 1024,
+
+        "beta": 0.52,
+        "bias": 0.00,
+        "soft_mask_temp": 0.70,
+
+        "habit_decay": 0.99,
         "verbose": false,
         "log_every": 65536
       },
-      "tag": "sca_moreanchors_b060_bias010_t050_ab24"
+      "tag": "sca_bins60_b052_bias000_t070_ab24"
+    },
+    {
+      "method": "sca-snn+ewc",
+      "params": {
+        "attach_to": "f6",
+        "flatten_spatial": false,
+
+        "num_bins": 50,
+        "anchor_batches": 24,
+        "bin_lo": -1.0,
+        "bin_hi": 1.0,
+        "max_per_bin": 1024,
+
+        "beta": 0.52,
+        "bias": 0.00,
+        "soft_mask_temp": 0.70,
+
+        "habit_decay": 0.99,
+        "verbose": false,
+        "log_every": 65536,
+
+        "lam": 3000000,
+        "fisher_batches": 200
+      },
+      "tag": "sca_bins60_b052_t070_ab24+ewc_lam3e6"
+    },
+    {
+      "method": "rehearsal",
+      "params": {
+        "buffer_size": 3000,
+        "replay_ratio": 0.10
+      },
+      "tag": "reh_buf3000_rr10"
     }
   ]
 }
