@@ -1,235 +1,146 @@
 # tools/sweep_methods.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
-import os, sys, time, json, argparse, traceback, gc
+import argparse, json, sys
 from pathlib import Path
-from typing import Any, Dict, List
-import multiprocessing as mp
+from copy import deepcopy
 
+# Asegura que 'src' esté en el sys.path ejecutando desde la raíz del repo
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-# ----------------- EXPS embebido (puedes editar aquí) -----------------
-DEFAULT_EXPS: List[Dict[str, Any]] = [
-    # ---------- SCA-SNN ----------
-    dict(
-        method="sca-snn",
-        params={
-            "attach_to": "f6", "flatten_spatial": False, "num_bins": 50, "anchor_batches": 16,
-            "beta": 0.55, "bias": 0.00, "soft_mask_temp": 0.30, "verbose": False, "log_every": 65536
-        },
-        tag="sca_looser_b055_bias000_t030_ab16"
-    ),
-    dict(
-        method="sca-snn",
-        params={
-            "attach_to": "f6", "flatten_spatial": False, "num_bins": 80, "anchor_batches": 16,
-            "beta": 0.65, "bias": 0.05, "soft_mask_temp": 0.00, "verbose": False, "log_every": 65536
-        },
-        tag="sca_hard_b065_bias005_t000_bins80"
-    ),
-    dict(
-        method="sca-snn",
-        params={
-            "attach_to": "f6", "flatten_spatial": False, "num_bins": 50, "anchor_batches": 24,
-            "beta": 0.60, "bias": 0.10, "soft_mask_temp": 0.50, "verbose": False, "log_every": 65536
-        },
-        tag="sca_moreanchors_b060_bias010_t050_ab24"
-    ),
+from src.config import load_preset
+from src.utils_components import build_components_for
+from src.runner import run_continual
 
-    # ---------- SA-SNN ----------
-    dict(
-        method="sa-snn",
-        params={
-            "attach_to": "f6", "k": 6, "tau": 24.0, "th_min": 1.0, "th_max": 2.0,
-            "p": 2_000_000, "vt_scale": 1.2, "flatten_spatial": False,
-            "assume_binary_spikes": False, "reset_counters_each_task": False
-        },
-        tag="sa_k6_tau24_vt1p2"
-    ),
+# ------------------------------- carga del sweep -------------------------------
 
-    # ---------- AS-SNN ----------
-    dict(
-        method="as-snn",
-        params={
-            "gamma_ratio": 0.30, "lambda_a": 1.59168, "ema": 0.90,
-            "attach_to": "f6", "measure_at": "modules", "penalty_mode": "l1",
-            "do_synaptic_scaling": False
-        },
-        tag="as_ref_gr03_lam1p59168"
-    ),
-    dict(
-        method="as-snn",
-        params={
-            "gamma_ratio": 0.25, "lambda_a": 1.20, "ema": 0.90,
-            "attach_to": "f6", "measure_at": "modules", "penalty_mode": "l1",
-            "do_synaptic_scaling": False
-        },
-        tag="as_soft_gr025_lam1p20"
-    ),
-    dict(
-        method="as-snn",
-        params={
-            "gamma_ratio": 0.35, "lambda_a": 1.80, "ema": 0.95,
-            "attach_to": "f6", "measure_at": "modules", "penalty_mode": "l1",
-            "do_synaptic_scaling": True, "scale_clip": (0.5, 2.0), "scale_bias": False
-        },
-        tag="as_scaling_gr035_lam1p80_ema095"
-    ),
+_POSSIBLE_KEYS = ("runs", "exps", "experiments", "sweep")
 
-    # ---------- baseline ----------
-    dict(method="naive", params={}, tag="baseline_naive"),
-]
+def _read_sweep(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"No existe el sweep file: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
 
-# ----------------- worker: un run por PROCESO -----------------
-def worker_run(exp: Dict[str, Any], preset: str, out_root: str, safe_dl: int, amp: str) -> str:
-    """Ejecuta un experimento en un subproceso y devuelve la ruta del run."""
-    import torch
-    from src.utils import load_preset, build_task_list_for, build_components_for
-    from src.runner import run_continual
+    # 1) Si ya es lista -> OK
+    if isinstance(data, list):
+        return data
 
-    # Config
-    cfg = load_preset(ROOT / "configs" / "presets.yaml", preset)
-    cfg["continual"]["method"] = exp["method"]
-    cfg["continual"]["params"] = exp["params"]
-    cfg.setdefault("naming", {})
-    cfg["naming"]["tag"] = exp.get("tag", "")
+    # 2) Si es dict, prueba claves comunes
+    if isinstance(data, dict):
+        for k in _POSSIBLE_KEYS:
+            v = data.get(k, None)
+            if isinstance(v, list):
+                return v
 
-    # Dataloader "seguro" si se pide
-    # 0: no tocar; 1: desactiva persistent_workers; 2: además num_workers=0 y pin_memory=False
-    if safe_dl >= 1:
-        cfg["data"]["persistent_workers"] = False
-    if safe_dl >= 2:
-        cfg["data"]["num_workers"] = 0
-        cfg["data"]["pin_memory"] = False
+        # 3) Si hay exactamente una clave cuyo valor es lista -> úsala
+        list_keys = [k for k, v in data.items() if isinstance(v, list)]
+        if len(list_keys) == 1:
+            return data[list_keys[0]]
 
-    # AMP override
-    if amp.lower() == "on":
-        cfg["optim"]["amp"] = True
-    elif amp.lower() == "off":
-        cfg["optim"]["amp"] = False
-    # "auto" => deja lo del preset
+        # 4) Si hay varias listas, elige la primera que parezca lista de runs
+        for k in list_keys:
+            v = data[k]
+            if all(isinstance(x, (str, dict)) for x in v):
+                return v
 
-    # Build
-    tfm, make_loader_fn, make_model_fn = build_components_for(cfg, ROOT)
-    task_list, _ = build_task_list_for(cfg, ROOT)
+        # 5) No se pudo inferir
+        keys_preview = ", ".join(list(data.keys())[:8])
+        raise TypeError(
+            "El sweep debe ser una lista de runs o un dict con una lista en "
+            f"alguna de estas claves: {', '.join(_POSSIBLE_KEYS)}. "
+            f"Claves detectadas: {keys_preview}"
+        )
 
-    # Info mínima en consola
-    print(f"\n[RUN] preset={preset} | method={exp['method']} | tag={exp.get('tag','')}")
-    print(f"[RUN] safe_dl={safe_dl} | amp={cfg['optim'].get('amp', None)}")
+    raise TypeError("El sweep debe ser una lista o un dict con una lista de runs.")
 
-    out_dir, _ = run_continual(
-        task_list=task_list,
-        make_loader_fn=make_loader_fn,
-        make_model_fn=make_model_fn,
-        tfm=tfm,
-        cfg=cfg,
-        preset_name=preset,
-        out_root=Path(out_root),
-        verbose=True,
-    )
+def _norm_run(run_spec):
+    """
+    Devuelve dict canónico con keys: method(str), params(dict), tag(str|None).
+    Admite:
+      - "ewc"
+      - {"method":"ewc", "params": {...}, "tag": "..."}
+    """
+    if isinstance(run_spec, str):
+        return {"method": run_spec, "params": {}, "tag": None}
+    if isinstance(run_spec, dict):
+        method = run_spec.get("method", run_spec.get("name", None))
+        if not isinstance(method, str) or not method:
+            raise ValueError(f"Run mal formado: falta 'method' en {run_spec}")
+        params = run_spec.get("params", {}) or {}
+        if not isinstance(params, dict):
+            raise ValueError(f"'params' debe ser dict en {run_spec}")
+        tag = run_spec.get("tag", None)
+        tag = str(tag) if tag is not None else None
+        return {"method": method, "params": params, "tag": tag}
+    raise TypeError(f"Tipo de run no soportado: {type(run_spec)}")
 
-    # Limpieza explícita antes de salir del hijo
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-    except Exception:
-        pass
-    gc.collect()
-    return str(out_dir)
+def _build_task_list_from_cfg(cfg):
+    prep = cfg.get("prep", {}) or {}
+    runs = prep.get("runs", None)
+    if not runs:
+        runs = ["circuito1", "circuito2"]
+    return [{"name": str(r)} for r in runs]
 
-def _child_entry(exp, preset, out_root, safe_dl, amp, conn):
-    try:
-        run_dir = worker_run(exp, preset, out_root, safe_dl, amp)
-        conn.send({"ok": True, "run_dir": run_dir})
-    except Exception as e:
-        tb = traceback.format_exc()
-        conn.send({"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": tb})
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+# ---------------------------------- CLI main ----------------------------------
 
 def main():
-    ap = argparse.ArgumentParser("Sweep de métodos (un proceso por run)")
-    ap.add_argument("--preset", default="accurate", help="Nombre de preset en configs/presets.yaml")
-    ap.add_argument("--sweep-file", default="", help="JSON con {'exps':[...]} (opcional)")
-    ap.add_argument("--only-methods", default="", help="Filtro por método: ej. 'sca-snn,sa-snn'")
-    ap.add_argument("--start", type=int, default=0, help="Índice inicial (inclusive) en la lista de EXPS")
-    ap.add_argument("--end",   type=int, default=-1, help="Índice final (inclusive); -1 hasta el final")
-    ap.add_argument("--out", default=str(ROOT / "outputs"), help="Carpeta de salida")
-    ap.add_argument("--sleep", type=float, default=1.0, help="Pausa entre runs (seg)")
-    ap.add_argument(
-        "--safe-dataloader", type=int, default=0, choices=[0, 1, 2],
-        help="0=no tocar; 1=desactiva persistent_workers; 2=workers=0 + pin_memory=False"
-    )
-    ap.add_argument("--amp", default="auto", choices=["auto","on","off"], help="Forzar AMP on/off o dejarlo en preset")
-    ap.add_argument("--dry", action="store_true", help="Solo listar qué se ejecutaría")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--preset", required=True, help="Nombre ('fast') o ruta a YAML.")
+    ap.add_argument("--sweep-file", required=True, help="Ruta a JSON con runs.")
+    ap.add_argument("--out", default="outputs", help="Carpeta de salida raíz.")
     args = ap.parse_args()
 
-    # Carga EXPS
-    exps: List[Dict[str, Any]]
-    if args.sweep_file:
-        data_text = Path(args.sweep_file).read_text(encoding="utf-8")
-        data = json.loads(data_text)
-        exps = data.get("exps", data) if isinstance(data, dict) else data
-    else:
-        exps = DEFAULT_EXPS
+    # 1) Carga preset base
+    base_cfg = load_preset(args.preset)
 
-    if args.only_methods:
-        keep = set(s.strip().lower() for s in args.only_methods.split(",") if s.strip())
-        exps = [e for e in exps if str(e.get("method", "")).lower() in keep]
+    # 2) Lee y normaliza runs
+    runs_in = _read_sweep(Path(args.sweep_file))
+    runs = [_norm_run(r) for r in runs_in]
 
-    if args.end >= 0:
-        exps = exps[args.start: args.end + 1]
-    else:
-        exps = exps[args.start:]
+    # 3) Construye componentes (dataset/modelo/tfm)
+    make_loader_fn, make_model_fn, tfm = build_components_for(base_cfg)
 
-    print(f"[INFO] {len(exps)} runs a ejecutar. OUT={args.out}")
-    for i, e in enumerate(exps, 1):
-        print(f"  {i:02d}. {e['method']} :: {e.get('tag','')}")
+    out_root = Path(args.out)
+    print(f"[INFO] {len(runs)} runs a ejecutar. OUT={out_root}")
 
-    if args.dry:
-        return
+    # 4) Ejecuta cada run sobreescribiendo cfg.continual y naming.tag
+    for i, r in enumerate(runs, start=1):
+        method, params, tag = r["method"], r["params"], r["tag"]
 
-    # ⚠️ Importante: NO forzar 'spawn' en Linux/WSL (rompe pickling de collate_fn locales).
-    # Dejamos el start method por defecto del sistema (fork en Linux/WSL).
-    # Si algún día ejecutas en Windows nativo, ahí sí habría que usar spawn.
+        cfg = deepcopy(base_cfg)
+        cfg.setdefault("continual", {})
+        cfg["continual"]["method"] = method
+        merged = dict(cfg["continual"].get("params", {}) or {})
+        merged.update(params or {})
+        cfg["continual"]["params"] = merged
 
-    for i, exp in enumerate(exps, 1):
-        print(f"\n=== [{i}/{len(exps)}] {exp['method']} | tag={exp.get('tag','')} ===")
-        p_conn, c_conn = mp.Pipe(duplex=False)
-        proc = mp.Process(
-            target=_child_entry,
-            args=(exp, args.preset, args.out, args.safe_dataloader, args.amp, c_conn),
-            daemon=False,
-        )
-        proc.start()
-        c_conn.close()
+        if tag:
+            cfg.setdefault("naming", {})
+            cfg["naming"]["tag"] = tag
 
-        run_dir = None
-        err = None
+        task_list = _build_task_list_from_cfg(cfg)
+        pretty = f"{method} :: {tag}" if tag else method
+        print(f"  {i:02d}. {pretty}")
+
         try:
-            msg = p_conn.recv()
-            if isinstance(msg, dict) and msg.get("ok"):
-                run_dir = msg.get("run_dir")
-                print("[OK] run_dir:", run_dir)
-            else:
-                err = msg.get("error", "Unknown error")
-        except EOFError:
-            err = "Proceso hijo terminó sin enviar resultado."
-        finally:
-            proc.join()
-            p_conn.close()
+            print(f"\n=== [{i}/{len(runs)}] {method} | tag={tag or 'exps'} ===\n")
+            run_continual(
+                task_list=task_list,
+                make_loader_fn=make_loader_fn,
+                make_model_fn=make_model_fn,
+                tfm=tfm,
+                cfg=cfg,
+                preset_name=(base_cfg.get('_meta', {}).get('preset_key') or args.preset),
+                out_root=out_root,
+                verbose=True,
+            )
+        except Exception as e:
+            print(f"[ERROR] {type(e).__name__}: {e}")
 
-        if err:
-            print(f"[ERROR] {err}")
-        time.sleep(args.sleep)
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

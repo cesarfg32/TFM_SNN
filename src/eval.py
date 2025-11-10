@@ -21,20 +21,20 @@ def _align_target_shape(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 def eval_loader(
     loader,
     model: nn.Module,
-    *,
     loss_fn: Optional[nn.Module] = None,
     device: Optional[torch.device] = None,
     use_amp: Optional[bool] = None,
 ) -> Tuple[float, float]:
     """
-    Devuelve (MAE_medio_por_batch, MSE_medio_por_batch).
+    Devuelve (mse_medio_por_batch, mae_medio_por_batch).
 
-    Parámetros:
-    - loss_fn: si None, usa nn.MSELoss().
-    - device: si None, se infiere del modelo (o 'cuda' si hay).
-    - use_amp: si None, True en CUDA.
+    Compatibilidad hacia atrás:
+      - Si 'loss_fn' es None, se usa nn.MSELoss().
+      - Si 'device' y/o 'use_amp' no se pasan, se infieren:
+          device  := device del primer parámetro del modelo (o 'cuda' si hay)
+          use_amp := (device.type == 'cuda')
     """
-    # Inferencias por defecto (firma robusta)
+    # Inferencias
     if device is None:
         try:
             device = next(model.parameters()).device
@@ -60,11 +60,10 @@ def eval_loader(
         with autocast("cuda", enabled=bool(use_amp)):
             v_loss = loss_fn(y_hat, y_aligned)
         v_running_mse += float(v_loss.detach().item())
-
         mae_batch = torch.abs(y_hat.to(torch.float32) - y_aligned.to(torch.float32)).mean()
         v_running_mae += float(mae_batch.detach().item())
         n_val_batches += 1
 
-    mae = v_running_mae / max(1, n_val_batches)
     mse = v_running_mse / max(1, n_val_batches)
-    return mae, mse
+    mae = v_running_mae / max(1, n_val_batches)
+    return mse, mae

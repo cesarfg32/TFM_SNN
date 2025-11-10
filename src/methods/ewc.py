@@ -8,6 +8,7 @@ from typing import Dict
 import torch
 from torch import nn
 
+from src.methods.base import BaseMethod
 from src.nn_io import _forward_with_cached_orientation, _align_target_shape
 
 @dataclass
@@ -20,8 +21,8 @@ class EWC:
     def __init__(self, model: nn.Module, cfg: EWCConfig):
         self.model = model
         self.cfg   = cfg
-        self._mu: Dict[str, torch.Tensor]     = {}
-        self._fisher: Dict[str, torch.Tensor] = {}
+        self._mu: Dict[str, torch.Tensor]      = {}
+        self._fisher: Dict[str, torch.Tensor]  = {}
 
     def _snapshot_params(self) -> Dict[str, torch.Tensor]:
         return {n: p.detach().clone() for n, p in self.model.named_parameters() if p.requires_grad}
@@ -29,48 +30,39 @@ class EWC:
     def estimate_fisher(self, loader, device: torch.device, loss_fn: nn.Module | None = None) -> int:
         """
         Estima Fisher ≈ E[(∂L/∂θ)^2].
-        - Asegura modelo en `device`.
-        - ¡Con gradientes habilitados! (sin no_grad)
+        Ejecuta en `device`, eval mode (sin dropout/BN updates), con grad ON.
         """
         device = torch.device(device)
         self.model.to(device)
 
         was_training = self.model.training
-        self.model.eval()  # eval para desactivar dropout/BN updates (pero con grad)
+        self.model.eval()
 
         fisher_loss_fn = loss_fn if loss_fn is not None else nn.MSELoss()
 
-        # Acumuladores (en el device correcto)
         fisher = {
             n: torch.zeros_like(p, device=p.device)
             for n, p in self.model.named_parameters()
             if p.requires_grad
         }
-        # Congela θ*
         self._mu = self._snapshot_params()
 
         n_batches = 0
         cap = int(self.cfg.fisher_batches)
-        phase_hint: Dict[str, str] = {"fisher": None}
+        phase_hint = {"fisher": None}
 
-        # Asegura que los gradientes están habilitados (por si alguien activó global no_grad)
         with torch.enable_grad():
             for x, y in loader:
                 y = y.to(device, non_blocking=True)
-
-                # forward (AMP-safe dentro de _forward_with_cached_orientation)
                 y_hat = _forward_with_cached_orientation(
                     model=self.model, x=x, y=y, device=device, use_amp=True, phase_hint=phase_hint, phase="fisher"
                 )
-                # loss en FP32 con grafo
                 y_aligned = _align_target_shape(y_hat, y).to(device=y_hat.device, dtype=y_hat.dtype, non_blocking=True)
                 loss = fisher_loss_fn(y_hat.to(torch.float32), y_aligned.to(torch.float32)).mean()
 
-                # backward
                 self.model.zero_grad(set_to_none=True)
                 loss.backward()
 
-                # acumula grad^2
                 for n, p in self.model.named_parameters():
                     if p.requires_grad and p.grad is not None:
                         fisher[n] += p.grad.detach().pow(2)
@@ -79,7 +71,6 @@ class EWC:
                 if n_batches >= cap:
                     break
 
-        # Promedia
         if n_batches > 0:
             for n in fisher:
                 fisher[n] /= float(n_batches)
@@ -100,13 +91,15 @@ class EWC:
                 reg = reg + (self._fisher[n] * (p - self._mu[n]).pow(2)).sum()
         return self.cfg.lambd * reg
 
-class EWCMethod:
+class EWCMethod(BaseMethod):
     name = "ewc"
+
     def __init__(self, model: nn.Module, lambd: float, fisher_batches: int, loss_fn: nn.Module, device: torch.device):
-        self.loss_fn = loss_fn
-        self.device = device
+        super().__init__(device=device, loss_fn=loss_fn)
         self.impl = EWC(model, EWCConfig(lambd=float(lambd), fisher_batches=int(fisher_batches)))
+        # nombre con lam normalizado (mantiene tu convención)
         self.name = f"ewc_lam_{lambd:.0e}"
+        # logging interno (compat con training)
         self.inner_verbose = getattr(self, "inner_verbose", False)
         self.inner_every   = getattr(self, "inner_every", 50)
 

@@ -5,7 +5,7 @@
 # ---- Bloque base (anclas) ----
 defaults: &defaults
   model: &defaults_model
-    name: pilotnet_snn
+    name: PilotNetSNN
     img_w: 200
     img_h: 66
     to_gray: true
