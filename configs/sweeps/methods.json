@@ -1,25 +1,6 @@
 {
   "exps": [
     {
-      "method": "sa-snn+ewc",
-      "params": {
-        "attach_to": "f6",
-        "k": 0.15,
-        "tau": 26.0,
-        "vt_scale": 1.1,
-        "th_min": 1.0,
-        "th_max": 2.0,
-        "p": 3000000,
-        "flatten_spatial": false,
-        "assume_binary_spikes": false,
-        "reset_counters_each_task": false,
-
-        "lam": 3000000,
-        "fisher_batches": 200
-      },
-      "tag": "sa_ratio15_tau26_vt1p1_p3m+ewc_lam3e6"
-    },
-    {
       "method": "sca-snn",
       "params": {
         "attach_to": "f6",

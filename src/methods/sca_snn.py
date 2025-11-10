@@ -37,6 +37,7 @@ class SCAConfig:
 
 
 # ------------------ utilidades de forma/similitud ------------------
+
 def _find_first_linear(m: nn.Module) -> Optional[nn.Module]:
     for mod in m.modules():
         if isinstance(mod, nn.Linear):
@@ -53,9 +54,12 @@ def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
 
 def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tuple[torch.Tensor, tuple[int, ...], bool]:
     """Normaliza a (T,B,N) para aplicar máscara por neurona."""
+    y = y.contiguous()  # SAFE: evita views raros antes de permutes/views
     orig = y.shape
+
     if y.ndim == 2:  # (B,N) ó (T,N), lo trataremos fuera si es ambiguo
-        return y.unsqueeze(0), orig, True
+        return y.unsqueeze(0).contiguous(), orig, True
+
     if y.ndim == 3:  # (T,B,N) o (B,T,N) o (B,N,T)
         TBN = y
         if T_hint and y.shape[-1] == T_hint:   # (B,N,T) -> (T,B,N)
@@ -64,21 +68,24 @@ def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tu
         if T_hint and y.shape[1] == T_hint:    # (B,T,N) -> (T,B,N)
             TBN = y.permute(1, 0, 2).contiguous()
             return TBN, orig, True
-        return TBN, orig, False
+        return TBN.contiguous(), orig, False
+
     if y.ndim == 5:  # (T,B,C,H,W) o (B,T,C,H,W)
         if T_hint and y.shape[0] != T_hint:
             y = y.permute(1, 0, 2, 3, 4).contiguous()
         T, B, C, H, W = y.shape
         if flatten_spatial:
-            return y.reshape(T, B, C * H * W), orig, (T_hint is not None)
-        return y.flatten(3).mean(3), orig, (T_hint is not None)
-    return y, orig, False
+            return y.reshape(T, B, C * H * W).contiguous(), orig, (T_hint is not None)
+        return y.flatten(3).mean(3).contiguous(), orig, (T_hint is not None)
+
+    return y.contiguous(), orig, False
 
 def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, flatten_spatial: bool) -> torch.Tensor:
+    yTBN = yTBN.contiguous()
     if len(orig_shape) == 2:
-        return yTBN.squeeze(0)
+        return yTBN.squeeze(0).contiguous()
     if len(orig_shape) == 3:
-        return yTBN.permute(1, 0, 2).contiguous() if need_back else yTBN
+        return (yTBN.permute(1, 0, 2).contiguous() if need_back else yTBN)
     if len(orig_shape) == 5:
         if need_back:
             return yTBN.permute(1, 0, *range(2, yTBN.ndim)).contiguous()
@@ -86,26 +93,55 @@ def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, 
     return yTBN
 
 def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Tensor:
+    # SAFE: tipos y NaNs
+    y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
     y = y.clamp(min=lo, max=hi)
-    t = (y - lo) / max(1e-8, (hi - lo))
-    idx = torch.floor(t * num_bins).long()
-    return idx.clamp_(0, num_bins - 1)
+    width = max(1e-8, (hi - lo))
+    t = (y - lo) / width
+    idx = torch.floor(t * float(num_bins)).to(torch.int64)
+    return idx.clamp_(0, num_bins - 1).contiguous()
 
 def _row_normalize_pos(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     x = torch.relu(x)
-    s = x.sum(dim=1, keepdim=True) + eps
+    s = x.sum(dim=1, keepdim=True)
+    s = torch.clamp(s, min=eps)
     return x / s
 
 def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
+    q = torch.nan_to_num(q, nan=0.0, posinf=0.0, neginf=0.0)
     p = (p + eps) / (p.sum(dim=1, keepdim=True) + eps)
     q = (q + eps) / (q.sum(dim=1, keepdim=True) + eps)
     kl_pq = (p * (p.add(eps).log() - q.add(eps).log())).sum(dim=1)
     kl_qp = (q * (q.add(eps).log() - p.add(eps).log())).sum(dim=1)
-    return 0.5 * (kl_pq + kl_qp)
+    out = 0.5 * (kl_pq + kl_qp)
+    return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 def _similarity_from_kl(kl_vals: torch.Tensor) -> float:
-    s = (1.0 / (1.0 + kl_vals)).clamp(0.0, 1.0)
+    s = (1.0 / (1.0 + kl_vals))
+    s = torch.clamp(s, 0.0, 1.0)
     return float(s.mean().item())
+
+# --------- helpers “seguros” por si necesitas bincount o topk en GPU ---------
+def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | None = None) -> torch.Tensor:
+    idx = torch.nan_to_num(idx, nan=0.0, posinf=0.0, neginf=0.0)
+    idx = idx.to(torch.int64).contiguous().clamp_(0, n_bins - 1)
+    if idx.numel() == 0:
+        dev = idx.device
+        dt = (weights.dtype if (weights is not None and isinstance(weights, torch.Tensor)) else torch.float32)
+        return torch.zeros(n_bins, device=dev, dtype=dt)
+    if weights is None:
+        return torch.bincount(idx, minlength=n_bins).to(torch.float32)
+    weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
+    return torch.bincount(idx, weights=weights, minlength=n_bins)
+
+def _topk_safe(score: torch.Tensor, k: int) -> torch.Tensor:
+    s = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+    k = max(1, int(k))
+    if k >= s.numel():
+        return torch.arange(s.numel(), device=s.device)
+    return torch.topk(s, k=k, largest=True, sorted=False).indices
 
 
 # ---------------------------- método ----------------------------
@@ -168,6 +204,8 @@ class SCA_SNN:
 
         # Normaliza forma y aplica máscara
         yTBN, orig, need_back = _to_TBN(out, self._T_seq, self.cfg.flatten_spatial)
+        yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+
         _, _, N = yTBN.shape
         if N != self._N:
             dev_target = self._ensure_target_device()
@@ -180,11 +218,13 @@ class SCA_SNN:
             m = torch.sigmoid((Rn - rho) / max(1e-6, self.cfg.soft_mask_temp)).view(1, 1, N)
         else:
             m = (Rn > rho).to(yTBN.dtype).view(1, 1, N)
+
         if m.device != yTBN.device:
             m = m.to(yTBN.device, non_blocking=True)
+        m = m.contiguous()
 
-        yTBN = yTBN * m
-        yTBN = torch.nan_to_num(yTBN)
+        yTBN = (yTBN * m).contiguous()
+        yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self.cfg.verbose:
             self._step += 1
@@ -203,6 +243,7 @@ class SCA_SNN:
     def _weight_grad_hook(self, grad: torch.Tensor):
         if not torch.is_tensor(grad):
             return
+        grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
         dev = grad.device
         n_out = grad.shape[0]
         with torch.no_grad():
@@ -214,26 +255,31 @@ class SCA_SNN:
                 self._R = self._R.to(dev, non_blocking=True)
 
             g_row = grad.pow(2).sum(dim=1).sqrt()  # (N_out,)
+            g_row = torch.nan_to_num(g_row, nan=0.0, posinf=0.0, neginf=0.0)
             self._Gacc.add_(g_row)
 
     # -------- helpers de estado --------
     def _setup_per_neuron_state(self, N: int, device):
-        self._N = N
+        self._N = int(N)
         self._R = torch.zeros(N, dtype=torch.float32, device=device)
         self._Gacc = torch.zeros(N, dtype=torch.float32, device=device)
 
     def _ensure_target_device(self) -> torch.device:
         if self._target is not None and hasattr(self._target, "weight") and isinstance(self._target.weight, torch.Tensor):
             return self._target.weight.device
-        return next(self._target.parameters()).device if self._target is not None else (
-            torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
-        )
+        if self._target is not None:
+            try:
+                return next(self._target.parameters()).device
+            except StopIteration:
+                pass
+        return torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
 
     # -------- anchors (por tarea) --------
     @torch.no_grad()
     def _collect_anchors_for_task(self, model: nn.Module, loader: DataLoader, device: torch.device) -> torch.Tensor:
         """Calcula medias de activación por bin (num_bins, N) en la capa objetivo."""
         assert self._target is not None and self._N is not None
+
         num_bins = int(self.cfg.num_bins)
         lo, hi = float(self.cfg.bin_lo), float(self.cfg.bin_hi)
         max_batches = int(self.cfg.anchor_batches)
@@ -251,12 +297,12 @@ class SCA_SNN:
 
         was_training = model.training
         model.eval()
-
         try:
             batches_seen = 0
             for x, y in loader:
                 x = x.to(device, non_blocking=True)
-                y = y.to(device, non_blocking=True).view(-1)  # (B,)
+                y = y.to(device, non_blocking=True).view(-1)
+                y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
                 B = int(y.shape[0])
 
                 # Desactiva autocast SOLO aquí para evitar NaNs en FP16 durante las anclas
@@ -269,6 +315,8 @@ class SCA_SNN:
                 if raw is None:
                     continue
 
+                raw = raw.contiguous()
+
                 # Normalizar a (B,N)
                 if raw.ndim == 2:
                     if raw.shape[0] == B:
@@ -277,62 +325,67 @@ class SCA_SNN:
                         F = raw.transpose(0, 1).contiguous()
                     elif raw.shape[0] % B == 0:
                         Tguess = raw.shape[0] // B
-                        F = raw.view(Tguess, B, -1).mean(dim=0)
+                        F = raw.view(Tguess, B, -1).mean(dim=0).contiguous()
                     else:
                         yTBN, _, _ = _to_TBN(raw, self._T_seq, self.cfg.flatten_spatial)
                         if yTBN.ndim == 3 and yTBN.shape[1] == B:
-                            F = yTBN.mean(dim=0)
+                            F = yTBN.mean(dim=0).contiguous()
                         else:
                             raise RuntimeError(f"[SCA] No puedo normalizar out con shape {tuple(raw.shape)} a (B,N) con B={B}")
                 elif raw.ndim == 3:
                     yTBN, _, _ = _to_TBN(raw, self._T_seq, self.cfg.flatten_spatial)
                     if yTBN.shape[1] != B:
                         if raw.shape[0] == B:
-                            F = raw.mean(dim=1)
+                            F = raw.mean(dim=1).contiguous()
                         elif raw.shape[1] == B:
-                            F = raw.mean(dim=0)
+                            F = raw.mean(dim=0).contiguous()
                         elif raw.shape[-1] == B:
-                            F = raw.permute(0, 2, 1).contiguous().mean(dim=0)
+                            F = raw.permute(0, 2, 1).contiguous().mean(dim=0).contiguous()
                         else:
                             raise RuntimeError(f"[SCA] out 3D no compatible con B={B}: {tuple(raw.shape)}")
                     else:
-                        F = yTBN.mean(dim=0)
+                        F = yTBN.mean(dim=0).contiguous()
                 else:
                     yTBN, _, _ = _to_TBN(raw, self._T_seq, self.cfg.flatten_spatial)
                     if yTBN.ndim == 3 and yTBN.shape[1] == B:
-                        F = yTBN.mean(dim=0)
+                        F = yTBN.mean(dim=0).contiguous()
                     else:
                         raise RuntimeError(f"[SCA] out ND no soportado: {tuple(raw.shape)} con B={B}")
 
                 if F.device != device:
                     F = F.to(device, non_blocking=True)
-                F = torch.nan_to_num(F.float())  # (B,N), FP32 estable
+                F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()  # (B,N), FP32 estable
 
-                # Binning y acumulación
+                # Binning y acumulación (modo robusto sin kernels raros)
                 bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
                 for b in range(num_bins):
-                    mask = (bidx == b)  # (B,)
+                    mask = (bidx == b)
                     if mask.any():
                         take = F[mask]
-                        room = self.cfg.max_per_bin - cnt_per_bin[b]
+                        room = int(self.cfg.max_per_bin) - cnt_per_bin[b]
                         if room <= 0:
                             continue
                         if take.shape[0] > room:
                             take = take[:room]
-                        sum_per_bin[b].add_(take.sum(dim=0))
+                        sum_per_bin[b].add_(torch.nan_to_num(take.sum(dim=0), nan=0.0, posinf=0.0, neginf=0.0))
                         cnt_per_bin[b] += int(take.shape[0])
 
                 batches_seen += 1
                 if batches_seen >= max_batches:
                     break
         finally:
-            tmp_handle.remove()
+            try:
+                tmp_handle.remove()
+            except Exception:
+                pass
             if was_training:
                 model.train()
 
         anchors = torch.stack([
             (sum_per_bin[b] / max(1, cnt_per_bin[b])) for b in range(num_bins)
-        ], dim=0)  # (num_bins, N)
+        ], dim=0).contiguous()  # (num_bins, N)
+
+        anchors = torch.nan_to_num(anchors, nan=0.0, posinf=0.0, neginf=0.0)
         anchors = _row_normalize_pos(anchors)
         return anchors
 
@@ -365,7 +418,7 @@ class SCA_SNN:
         if self._R is not None and self._Gacc is not None:
             with torch.no_grad():
                 self._R.mul_(self.cfg.habit_decay)
-                g = self._Gacc
+                g = torch.nan_to_num(self._Gacc, nan=0.0, posinf=0.0, neginf=0.0)
                 try:
                     q = torch.quantile(g, 0.95) if g.numel() else torch.tensor(1.0, device=g.device)
                 except Exception:
@@ -374,6 +427,7 @@ class SCA_SNN:
                     q = torch.tensor(1.0, device=g.device if isinstance(g, torch.Tensor) else dev)
                 self._R.add_(g / q)
                 self._Gacc.zero_()
+
         return torch.zeros((), dtype=torch.float32, device=dev)
 
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
@@ -440,6 +494,7 @@ class SCA_SNN:
             _ = self.penalty()  # decay + reset Gacc
         except Exception:
             pass
+
         if self._target is None or self._N is None:
             return
         dev_target = self._ensure_target_device()

@@ -126,7 +126,7 @@ fast:
   optim:
     <<: *defaults_optim
     lr: 6.0e-4
-    epochs: 12
+    epochs: 2 # 12
     batch_size: 320
     es_patience: 2
     es_min_delta: 7.5e-4
