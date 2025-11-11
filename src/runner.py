@@ -1,10 +1,8 @@
-# src/runner.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 from pathlib import Path
-import sys, json, torch, math, os, time as _time, logging, platform, gc
-from typing import Dict, Any, Tuple, List, Optional
+import sys, json, torch, math, os, time as _time, logging, gc
+from typing import Dict, Any, Tuple, List, Optional, Union
 
 # Entorno seguro para WSL/HDF5
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -106,6 +104,7 @@ def _forgetting_summary(names: List[str], per_task: Dict[str, Dict[str, float]])
             summary["circuito2_forget_abs"] = summary[f"task_{idx}_forget_abs"]
             summary["circuito2_forget_rel"] = summary[f"task_{idx}_forget_rel"]
         try:
+            # FIX: sin paréntesis extra
             if isinstance(fr, (int, float)) and math.isfinite(float(fr)):
                 rels.append(float(fr))
         except Exception:
@@ -113,7 +112,7 @@ def _forgetting_summary(names: List[str], per_task: Dict[str, Dict[str, float]])
     summary["avg_forget_rel"] = (sum(rels) / len(rels)) if rels else None
     return summary
 
-def _torch_cuda_mem_peak_mb() -> float | None:
+def _torch_cuda_mem_peak_mb() -> Optional[float]:
     if not torch.cuda.is_available():
         return None
     try:
@@ -146,16 +145,15 @@ def _to_csv_lines_from_history(history: dict) -> str:
         lines.append(",".join(row))
     return "\n".join(lines)
 
-def _pick_c2_name(task_names: List[str]) -> str | None:
+def _pick_c2_name(task_names: List[str]) -> Optional[str]:
     import re
     for n in task_names:
         if re.search(r"(c2|circuito2|track2|tarea2|task2)", n, re.I):
             return n
     return task_names[1] if len(task_names) >= 2 else (task_names[-1] if task_names else None)
 
-# NUEVO: clonar loader con num_workers=0 para anclas (SCA)
+# helper genérico (solo fallback por errores de DataLoader/WSL)
 def _to_single_worker_loader(loader: DataLoader) -> DataLoader:
-    """Clona un DataLoader para uso *solo* en cálculo de anclas (SCA)."""
     try:
         return DataLoader(
             loader.dataset,
@@ -172,21 +170,6 @@ def _to_single_worker_loader(loader: DataLoader) -> DataLoader:
         )
     except Exception:
         return loader
-
-# NUEVO: manifest por tarea
-def _write_task_manifest(task_dir: Path, meta: Dict[str, Any], history: Dict[str, Any]) -> None:
-    payload = {
-        "meta": meta,
-        "history": {
-            "train_loss": history.get("train_loss", []),
-            "val_loss":   history.get("val_loss",   []),
-            "val_mae":    history.get("val_mae",    []),
-            "val_mse":    history.get("val_mse",    []),
-            "train_mae":  history.get("train_mae",  []),
-            "train_mse":  history.get("train_mse",  []),
-        },
-    }
-    _safe_write(Path(task_dir) / "manifest.json", payload)
 
 def _nan_to_none_matrix(M: List[List[float]]) -> List[List[Optional[float]]]:
     out: List[List[Optional[float]]] = []
@@ -214,13 +197,13 @@ def _load_checkpoint_if_exists(
 
 # ================================================
 def run_continual(
-    task_list: list[dict],
+    task_list: List[dict],
     make_loader_fn,
     make_model_fn,
     tfm,
     cfg: Dict[str, Any],
     preset_name: str,
-    out_root: Path | str | None = None,
+    out_root: Optional[Union[Path, str]] = None,
     verbose: bool = True,
 ):
     data  = cfg["data"];  optim = cfg["optim"];  cont = cfg["continual"];  naming = cfg.get("naming", {})
@@ -229,7 +212,6 @@ def run_continual(
     T        = int(data["T"])
     gain     = float(data["gain"])
     seed     = int(data.get("seed", 42))
-
     use_offline = bool(data.get("use_offline_spikes", False))
 
     epochs  = int(optim["epochs"])
@@ -370,6 +352,10 @@ def run_continual(
             es_min_delta=es_md,
         )
 
+        # Preparar modelo/device
+        device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model   = model.to(device)
+
         for i, t in enumerate(task_list, start=1):
             name = t["name"]
             if verbose:
@@ -380,48 +366,44 @@ def run_continual(
             tr, va, te = make_loader_fn(
                 task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
             )
+
             # runtime encode si NO hay offline spikes
-            xb_sample, _ = next(iter(tr))
             used_rt = False
-            if (not use_offline) and xb_sample.ndim == 4:
-                set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
-                used_rt = True
-                if verbose: print("  runtime encode: ON (GPU)")
+            try:
+                xb_sample, _ = next(iter(tr))
+            except StopIteration:
+                xb_sample = None
+            if (not use_offline) and xb_sample is not None and xb_sample.ndim == 4:
+                try:
+                    set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
+                    used_rt = True
+                    if verbose: print("  runtime encode: ON (GPU)")
+                except Exception:
+                    used_rt = False
 
-            # SOLO SCA: loader anclas single-worker
-            is_sca = "sca-snn" in method_obj.name.lower() or "sca_snn" in method_obj.name.lower()
-            tr_anchor = _to_single_worker_loader(tr) if is_sca else tr
-
+            # Estrategia: el método decide internamente si necesita loaders ancla, etc.
             if hasattr(method_obj, "prepare_train_loader"):
                 tr = method_obj.prepare_train_loader(tr)
 
             # Telemetría inicio de tarea
             log_telemetry_event(out_dir, {"event": "task_start", "task_idx": i, "task_name": name})
 
-            # before_task (SCA usa tr_anchor)
-            method_obj.before_task(model, tr_anchor, va)
+            # Hooks de Strategy (SCA/SA/AS/Rehearsal/EWC actúan internamente)
+            method_obj.before_task(model, tr, va)
 
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
             t0 = _time.time()
 
-            # Entrenamiento
+            # Entrenamiento (con fallback por problemas de DataLoader)
             try:
                 history = train_supervised(
                     model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
                 )
             except Exception as e:
                 msg = f"{type(e).__name__}: {e}".lower()
-                triggers = (
-                    "bus error",
-                    "unexpected bus error",
-                    "shared memory",
-                    "shm",
-                    "dataloader worker",
-                    "worker exited",
-                    "multiprocessing",
-                )
+                triggers = ("bus error", "unexpected bus error", "shared memory", "shm", "dataloader worker", "worker exited", "multiprocessing")
                 if any(t in msg for t in triggers):
                     print("[WARN] DataLoader/WSL issue detectado. Reintento con num_workers=0…")
                     tr_safe = _to_single_worker_loader(tr)
@@ -460,22 +442,21 @@ def run_continual(
                     "seed": seed,
                     "model": _model_label(model, tfm),
                 }
-                _write_task_manifest(out_dir / f"task_{i}_{name}", meta, history or {})
+                _safe_write(out_dir / f"task_{i}_{name}" / "manifest.json", {"meta": meta, "history": history or {}})
             except Exception:
                 pass
 
             n_epochs_done = len((history or {}).get("val_loss", []))
 
-            # Eval del task actual y retro-eval de previos
-            te_mae, te_mse = eval_loader(te, model, device=device, use_amp=use_amp)
-            results[name] = {"test_mae": te_mae, "test_mse": te_mse}
+            # === EVAL: eval_loader devuelve (mse, mae) ===
+            te_mse, te_mae = eval_loader(te, model, loss_fn=loss_fn, device=device, use_amp=use_amp)
+            results[name] = {"test_mse": te_mse, "test_mae": te_mae}
             seen.append((name, te))
             for pname, p_loader in seen[:-1]:
-                p_mae, p_mse = eval_loader(p_loader, model, device=device, use_amp=use_amp)
-                results[pname][f"after_{name}_mae"] = p_mae
+                p_mse, p_mae = eval_loader(p_loader, model, loss_fn=loss_fn, device=device, use_amp=use_amp)
                 results[pname][f"after_{name}_mse"] = p_mse
+                results[pname][f"after_{name}_mae"] = p_mae
 
-            # fila de rendimiento por tarea
             perf_rows.append({
                 "task_idx": i, "task_name": name,
                 "train_time_sec": t1 - t0,
@@ -485,28 +466,21 @@ def run_continual(
                 "test_mae": float(te_mae) if te_mae is not None else None,
             })
 
-            # Guardar estado de método si procede
-            try:
-                snap = None
-                if hasattr(method_obj, "get_state"):
-                    snap = method_obj.get_state()
-                elif hasattr(method_obj, "get_activity_state"):
-                    snap = method_obj.get_activity_state()
-                if snap is not None:
-                    _safe_write(out_dir / f"method_state_task_{i}_{name}.json", snap)
-            except Exception:
-                pass
+            if hasattr(method_obj, "after_task"):
+                method_obj.after_task(model, tr, va)
 
             if used_rt:
-                set_encode_runtime(None)
-                if verbose: print("  runtime encode: OFF")
+                try:
+                    set_encode_runtime(None)
+                    if verbose: print("  runtime encode: OFF")
+                except Exception:
+                    pass
 
-            # Telemetría fin de tarea
             log_telemetry_event(out_dir, {"event": "task_end", "task_idx": i, "task_name": name})
 
             # Limpieza ligera
             try:
-                del xb_sample, tr_anchor
+                del xb_sample
                 del tr, va, te
             except Exception:
                 pass
@@ -520,7 +494,7 @@ def run_continual(
     # --- Salidas finales ---
     _safe_write(out_dir / "continual_results.json", results)
 
-    names, mat = _build_eval_matrix(results)
+    names, mat = _build_eval_matrix(results)  # matriz MAE
     eval_mat = {"tasks": names, "mae_matrix": _nan_to_none_matrix(mat)}
     _safe_write(out_dir / "eval_matrix.json", eval_mat)
 
@@ -652,8 +626,8 @@ def run_continual(
 # Reevaluación SOLO-EVAL
 # =========================================================
 def reevaluate_only(
-    out_dir: Path | str,
-    task_list: list[dict],
+    out_dir: Union[Path, str],
+    task_list: List[dict],
     make_loader_fn,
     make_model_fn,
     tfm,
@@ -708,13 +682,13 @@ def reevaluate_only(
         with torch.no_grad():
             # Eval de la tarea j (diagonal)
             tj_name, tj_loader = tests[j-1]
-            mae_j, mse_j = eval_loader(tj_loader, model, loss_fn=loss_fn, device=device, use_amp=(device.type=="cuda"))
+            mse_j, mae_j = eval_loader(tj_loader, model, loss_fn=loss_fn, device=device, use_amp=(device.type=="cuda"))
             mat[j-1][j-1] = float(mae_j) if mae_j is not None else math.nan
 
             # Finalizar columna j evaluando i<=j
             for i_idx in range(0, j):
                 ti_name, ti_loader = tests[i_idx]
-                mae_i, _ = eval_loader(ti_loader, model, loss_fn=loss_fn, device=device, use_amp=(device.type=="cuda"))
+                mse_i, mae_i = eval_loader(ti_loader, model, loss_fn=loss_fn, device=device, use_amp=(device.type=="cuda"))
                 mat[i_idx][j-1] = float(mae_i) if mae_i is not None else math.nan
 
     # Guardar eval_matrix y derivados

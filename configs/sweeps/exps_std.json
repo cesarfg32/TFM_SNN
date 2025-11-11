@@ -1,40 +1,21 @@
 {
   "experiments": [
-    { "method": "naive", "params": {}, "tag": "std_naive", "preset": "std" },
+    { "method": "naive", "params": {}, "tag": "stdt16_naive", "preset": "std_t16" },
 
-    { "method": "ewc",
-      "params": { "lam": 10000000, "fisher_batches": 200 },
-      "tag": "std_ewc_lam1e7_f200", "preset": "std" },
-
-    { "method": "as-snn",
-      "params": { "measure_at": "input", "gamma_ratio": 0.33, "lambda_a": 0.9, "ema": 0.90 },
-      "tag": "std_as_input_gr033_lam0p9_e090", "preset": "std" },
-
-    { "method": "as-snn",
-      "params": { "measure_at": "modules", "attach_to": "f6", "gamma_ratio": 0.30, "lambda_a": 1.2, "ema": 0.90, "do_synaptic_scaling": false },
-      "tag": "std_as_modules_f6_gr030_lam1p2", "preset": "std" },
-
-    { "method": "sa-snn",
-      "params": { "attach_to": "f6", "k": 9, "tau": 28, "vt_scale": 1.25,
-                  "th_min": 1.0, "th_max": 2.0, "p": 3000000,
-                  "flatten_spatial": false, "assume_binary_spikes": false, "reset_counters_each_task": false },
-      "tag": "std_sa_k9_tau28_vt1p25_p3m", "preset": "std" },
+    { "method": "ewc", "params": { "lam": 1000000, "fisher_batches": 200 },
+      "tag": "stdt16_ewc_lam1e6_f200", "preset": "std_t16" },
 
     { "method": "sca-snn",
-      "params": { "attach_to": "f6", "flatten_spatial": false,
-                  "num_bins": 50, "anchor_batches": 16, "bin_lo": -1.0, "bin_hi": 1.0,
-                  "max_per_bin": 1024, "beta": 0.55, "bias": 0.00,
-                  "soft_mask_temp": 0.30, "habit_decay": 0.99, "verbose": false, "log_every": 16384 },
-      "tag": "std_sca_bins50_b055_t030_ab16", "preset": "std" },
+      "params": { "attach_to": "f6", "flatten_spatial": true,
+                  "num_bins": 30, "anchor_batches": 16, "bin_lo": -1.0, "bin_hi": 1.0,
+                  "max_per_bin": 1024, "beta": 0.40, "bias": 0.00,
+                  "soft_mask_temp": 0.60, "habit_decay": 0.99, "sim_min": 0.02 },
+      "tag": "stdt16_sca_bins30_b040_t060_ab16_flat1_sim002", "preset": "std_t16" },
 
-    { "method": "rehearsal",
-      "params": { "buffer_size": 3000, "replay_ratio": 0.15,
-                  "replay_num_workers": 0, "replay_pin_memory": false, "replay_persistent_workers": false },
-      "tag": "std_rehearsal_buf3000_rr15", "preset": "std" },
-
-    { "method": "as-snn+ewc",
-      "params": { "measure_at": "modules", "attach_to": "f6", "gamma_ratio": 0.30, "lambda_a": 1.2, "ema": 0.90,
-                  "lam": 3000000, "fisher_batches": 200 },
-      "tag": "std_as_modules_f6_gr030_lam1p2+ewc_lam3e6_f200", "preset": "std" }
+    { "method": "sa-snn",
+      "params": { "attach_to": "f6", "k": 8, "tau": 32, "vt_scale": 1.20, "p": 2000000,
+                  "th_min": 1.0, "th_max": 2.0, "flatten_spatial": false,
+                  "assume_binary_spikes": false, "reset_counters_each_task": true },
+      "tag": "stdt16_sa_k8_tau32_vt1p20_p2m_reset", "preset": "std_t16" }
   ]
 }

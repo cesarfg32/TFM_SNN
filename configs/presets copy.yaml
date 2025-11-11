@@ -126,10 +126,10 @@ fast:
   optim:
     <<: *defaults_optim
     lr: 6.0e-4
-    epochs: 2
+    epochs: 2 # 12
     batch_size: 320
-    es_patience: null
-    es_min_delta: null
+    es_patience: null   # 2
+    es_min_delta: null  # 7.5e-4
     compile: false
   continual:
     <<: *defaults_continual
@@ -151,8 +151,8 @@ std:
     lr: 5.0e-4
     epochs: 16
     batch_size: 256
-    es_patience: null
-    es_min_delta: null
+    es_patience: null   # 3
+    es_min_delta: null  # 5.0e-4
     compile: false
   continual:
     <<: *defaults_continual
@@ -162,31 +162,6 @@ std:
     <<: *defaults_logging
   naming:
     <<: *defaults_naming
-
-# Nuevo preset para la siguiente fase (no se ejecuta ahora)
-std_t16:
-  <<: *defaults
-  data:
-    <<: *defaults_data
-    T: 16          # recomendado
-    gain: 0.50     # recomendado
-  optim:
-    <<: *defaults_optim
-    lr: 5.0e-4
-    epochs: 8
-    batch_size: 240   # mantiene aprox B·T ≈ 3840
-    es_patience: 2
-    es_min_delta: 7.5e-4
-    compile: false
-  continual:
-    <<: *defaults_continual
-  prep:
-    <<: *defaults_prep
-  logging:
-    <<: *defaults_logging
-  naming:
-    <<: *defaults_naming
-
 
 accurate:
   <<: *defaults

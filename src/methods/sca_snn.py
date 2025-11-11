@@ -8,19 +8,20 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .base import BaseMethod
+from src.nn_io import _forward_with_cached_orientation  # orientación/dtype consistentes
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
 # ------------------------------------------------------------
 @dataclass
 class SCAConfig:
-    attach_to: Optional[str] = None   # p.ej. "f6" en PilotNetSNN; None -> primera Linear
+    attach_to: Optional[str] = None   # p.ej., "f6" en PilotNetSNN; None -> primera Linear
     flatten_spatial: bool = True
 
     # Similaridad (anchors)
     num_bins: int = 50
     bin_lo: float = -1.0
-    bin_hi: float =  1.0
+    bin_hi: float = 1.0
     anchor_batches: int = 8
     max_per_bin: int = 1024
 
@@ -29,6 +30,9 @@ class SCAConfig:
     bias: float = 0.0
     habit_decay: float = 0.99
     soft_mask_temp: float = 0.0
+
+    # Límite inferior opcional para la similaridad (suelo externo)
+    sim_min: Optional[float] = None
 
     # logging
     verbose: bool = False
@@ -45,6 +49,7 @@ def _find_first_linear(m: nn.Module) -> Optional[nn.Module]:
             return mod
     return None
 
+
 def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
     cur = m
     for p in path.split("."):
@@ -53,12 +58,13 @@ def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
         cur = getattr(cur, p)
     return cur if isinstance(cur, nn.Module) else None
 
+
 def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tuple[torch.Tensor, tuple[int, ...], bool]:
     """Normaliza a (T,B,N) para aplicar máscara por neurona."""
-    y = y.contiguous()  # SAFE: evita views raros antes de permutes/views
+    y = y.contiguous()
     orig = y.shape
 
-    if y.ndim == 2:  # (B,N) ó (T,N), lo trataremos fuera si es ambiguo
+    if y.ndim == 2:  # (B,N) ó (T,N)
         return y.unsqueeze(0).contiguous(), orig, True
 
     if y.ndim == 3:  # (T,B,N) o (B,T,N) o (B,N,T)
@@ -81,6 +87,7 @@ def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tu
 
     return y.contiguous(), orig, False
 
+
 def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, flatten_spatial: bool) -> torch.Tensor:
     yTBN = yTBN.contiguous()
     if len(orig_shape) == 2:
@@ -93,8 +100,8 @@ def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, 
         return yTBN
     return yTBN
 
+
 def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Tensor:
-    # SAFE: tipos y NaNs
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
     y = y.clamp(min=lo, max=hi)
     width = max(1e-8, (hi - lo))
@@ -102,12 +109,14 @@ def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Te
     idx = torch.floor(t * float(num_bins)).to(torch.int64)
     return idx.clamp_(0, num_bins - 1).contiguous()
 
+
 def _row_normalize_pos(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     x = torch.relu(x)
     s = x.sum(dim=1, keepdim=True)
     s = torch.clamp(s, min=eps)
     return x / s
+
 
 def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
@@ -119,30 +128,11 @@ def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.
     out = 0.5 * (kl_pq + kl_qp)
     return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
+
 def _similarity_from_kl(kl_vals: torch.Tensor) -> float:
     s = (1.0 / (1.0 + kl_vals))
     s = torch.clamp(s, 0.0, 1.0)
     return float(s.mean().item())
-
-# --------- helpers “seguros” por si necesitas bincount o topk en GPU ---------
-def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | None = None) -> torch.Tensor:
-    idx = torch.nan_to_num(idx, nan=0.0, posinf=0.0, neginf=0.0)
-    idx = idx.to(torch.int64).contiguous().clamp_(0, n_bins - 1)
-    if idx.numel() == 0:
-        dev = idx.device
-        dt = (weights.dtype if (weights is not None and isinstance(weights, torch.Tensor)) else torch.float32)
-        return torch.zeros(n_bins, device=dev, dtype=dt)
-    if weights is None:
-        return torch.bincount(idx, minlength=n_bins).to(torch.float32)
-    weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
-    return torch.bincount(idx, weights=weights, minlength=n_bins)
-
-def _topk_safe(score: torch.Tensor, k: int) -> torch.Tensor:
-    s = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
-    k = max(1, int(k))
-    if k >= s.numel():
-        return torch.arange(s.numel(), device=s.device)
-    return torch.topk(s, k=k, largest=True, sorted=False).indices
 
 
 # ---------------------------- método ----------------------------
@@ -150,7 +140,7 @@ class SCA_SNN(BaseMethod):
     name = "sca-snn"
 
     def __init__(self, **kw):
-        super().__init__()  # <- único añadido para integrar con BaseMethod
+        super().__init__()  # integra con BaseMethod
         self.cfg = SCAConfig(**{k: v for k, v in kw.items() if k in SCAConfig.__annotations__})
         self.name = (
             f"{self.name}"
@@ -177,8 +167,11 @@ class SCA_SNN(BaseMethod):
         self._T_seq: int = int(self.cfg.T or 1)
         self._need_grad_hook: bool = True
 
-        # Nuevo: suspender el gating durante la recogida de anclas
+        # Durante recogida de anclas: no aplicar máscara
         self._suspend_mask: bool = False
+
+        # aviso único si no se puede inferir B en anclas
+        self._warned_shape_once: bool = False
 
     # -------- pre-forward: detectar T --------
     def _model_pre_forward_hook(self, module: nn.Module, inputs: Tuple[torch.Tensor, ...]):
@@ -195,16 +188,69 @@ class SCA_SNN(BaseMethod):
         else:
             self._T_seq = int(self.cfg.T or 1)
 
+    # -------- helper robusto: (B,N) a partir del hook --------
+    def _norm_BN(self, out: torch.Tensor, B: int) -> torch.Tensor:
+        """
+        Devuelve (B,N) a partir de 'out'.
+        Soporta (B,N), (T,B,N), (B,T,N), (B,N,T), (B,C,H,W), (T,B,C,H,W), etc.
+        - Promedia en T si existe.
+        - Si flatten_spatial=True, promedia HxW antes de aplanar.
+        - Si no se puede inferir B, degrada con un vector medio repetido B veces (sin lanzar).
+        """
+        t = out
+        if not torch.is_tensor(t):
+            raise RuntimeError("[SCA] Hook no devolvió un tensor válido.")
+        t = t.contiguous()
+
+        # Caso directo: (B, N...)
+        if t.ndim >= 2 and t.shape[0] == B:
+            if t.ndim >= 4 and self.cfg.flatten_spatial:
+                t = t.mean(dim=(-1, -2))  # (B,C)
+            return t.view(B, -1)
+
+        # Reordenar si B está en otro eje
+        if B in t.shape:
+            bdim = list(t.shape).index(B)
+            perm = [bdim] + [i for i in range(t.ndim) if i != bdim]
+            t = t.permute(*perm).contiguous()  # (B, ...)
+            if t.ndim >= 3 and t.shape[1] == self._T_seq:  # (B, T, ...)
+                t = t.mean(dim=1)
+            if t.ndim >= 4 and self.cfg.flatten_spatial:
+                t = t.mean(dim=(-1, -2))
+            return t.view(B, -1)
+
+        # Temporal al frente: (T,B,...) o (T,...) sin B
+        if t.ndim >= 3 and t.shape[0] == self._T_seq:
+            if t.ndim >= 3 and t.shape[1] != 0:
+                if t.shape[1] == B:
+                    t = t.mean(dim=0)  # (B, ...)
+                    if t.ndim >= 3 and self.cfg.flatten_spatial:
+                        t = t.mean(dim=(-1, -2))
+                    return t.view(B, -1)
+
+        # Fallback (benigno)
+        if not self._warned_shape_once:
+            print(f"[SCA] WARNING: no puedo inferir (B={B}) desde shape={tuple(out.shape)}; "
+                  f"usaré media global repetida (degradación suave).")
+            self._warned_shape_once = True
+
+        v = out
+        if v.ndim >= 3 and self.cfg.flatten_spatial:
+            v = v.mean(dim=tuple(range(2, v.ndim)))  # agrega espacial
+        if v.ndim >= 2 and v.shape[0] == self._T_seq:
+            v = v.mean(dim=0)  # promedia T si va delante
+        v = v.view(-1) if v.ndim == 1 else v.mean(dim=0)  # (N,)
+        v = torch.nan_to_num(v.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        return v.view(1, -1).repeat(B, 1).contiguous()
+
     # -------- forward hook: gating --------
     def _forward_hook(self, module: nn.Module, inputs: Tuple[torch.Tensor, ...], out: torch.Tensor):
         if not torch.is_tensor(out) or self._N is None or self._R is None:
             return out
 
-        # Si estamos recogiendo anclas, no aplicar máscara (evita sesgo/circularidad)
         if self._suspend_mask:
             return out
 
-        # Normaliza forma y aplica máscara
         yTBN, orig, need_back = _to_TBN(out, self._T_seq, self.cfg.flatten_spatial)
         yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
 
@@ -223,7 +269,6 @@ class SCA_SNN(BaseMethod):
 
         if m.device != yTBN.device:
             m = m.to(yTBN.device, non_blocking=True)
-        m = m.contiguous()
 
         yTBN = (yTBN * m).contiguous()
         yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0)
@@ -255,7 +300,6 @@ class SCA_SNN(BaseMethod):
                 self._Gacc = self._Gacc.to(dev, non_blocking=True)
             if (self._R is not None) and (self._R.device != dev):
                 self._R = self._R.to(dev, non_blocking=True)
-
             g_row = grad.pow(2).sum(dim=1).sqrt()  # (N_out,)
             g_row = torch.nan_to_num(g_row, nan=0.0, posinf=0.0, neginf=0.0)
             self._Gacc.add_(g_row)
@@ -276,6 +320,26 @@ class SCA_SNN(BaseMethod):
                 pass
         return torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
 
+    # -------- loader anclas single-worker (interno, Strategy) --------
+    def _make_anchor_loader(self, loader: DataLoader) -> DataLoader:
+        try:
+            return DataLoader(
+                loader.dataset,
+                batch_size=loader.batch_size,
+                sampler=getattr(loader, "sampler", None),
+                shuffle=False,
+                num_workers=0,
+                pin_memory=False,
+                persistent_workers=False,
+                prefetch_factor=1,
+                drop_last=False,
+                collate_fn=loader.collate_fn,
+                timeout=0,
+            )
+        except Exception:
+            # en caso extremo, usar el original
+            return loader
+
     # -------- anchors (por tarea) --------
     @torch.no_grad()
     def _collect_anchors_for_task(self, model: nn.Module, loader: DataLoader, device: torch.device) -> torch.Tensor:
@@ -286,11 +350,12 @@ class SCA_SNN(BaseMethod):
         lo, hi = float(self.cfg.bin_lo), float(self.cfg.bin_hi)
         max_batches = int(self.cfg.anchor_batches)
 
-        # Hook temporal: guarda out bruto (un solo buffer)
-        grab = {"out": None}
+        # Hook temporal: acumula TODAS las salidas de la capa objetivo a lo largo de T
+        grab: Dict[str, List[torch.Tensor]] = {"outs": []}
+
         def _cap_hook(_m, _inp, out):
             if torch.is_tensor(out):
-                grab["out"] = out.detach()
+                grab["outs"].append(out.detach())
 
         tmp_handle = self._target.register_forward_hook(_cap_hook, with_kwargs=False)
 
@@ -301,63 +366,39 @@ class SCA_SNN(BaseMethod):
         model.eval()
         try:
             batches_seen = 0
+            phase_hint = {"val": None}
             for x, y in loader:
                 x = x.to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True).view(-1)
                 y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
                 B = int(y.shape[0])
 
-                # Desactiva autocast SOLO aquí para evitar NaNs en FP16 durante las anclas
-                dev_type = "cuda" if torch.cuda.is_available() else "cpu"
-                with torch.amp.autocast(device_type=dev_type, enabled=False):
-                    _ = model(x)  # dispara hook
+                _ = _forward_with_cached_orientation(
+                    model=model, x=x, y=y,
+                    device=device, use_amp=False,     # anchors en FP32 estable
+                    phase_hint=phase_hint, phase="val"
+                )
 
-                raw = grab["out"]
-                grab["out"] = None
-                if raw is None:
+                # Extrae y apila las salidas capturadas (T llamadas al hook)
+                outs = grab["outs"]
+                grab["outs"] = []
+                if len(outs) == 0:
                     continue
-
-                raw = raw.contiguous()
-                # Normalizar a (B,N)
-                if raw.ndim == 2:
-                    if raw.shape[0] == B:
-                        F = raw
-                    elif raw.shape[1] == B:
-                        F = raw.transpose(0, 1).contiguous()
-                    elif raw.shape[0] % B == 0:
-                        Tguess = raw.shape[0] // B
-                        F = raw.view(Tguess, B, -1).mean(dim=0).contiguous()
-                    else:
-                        yTBN, _, _ = _to_TBN(raw, self._T_seq, self.cfg.flatten_spatial)
-                        if yTBN.ndim == 3 and yTBN.shape[1] == B:
-                            F = yTBN.mean(dim=0).contiguous()
-                        else:
-                            raise RuntimeError(f"[SCA] No puedo normalizar out con shape {tuple(raw.shape)} a (B,N) con B={B}")
-                elif raw.ndim == 3:
-                    yTBN, _, _ = _to_TBN(raw, self._T_seq, self.cfg.flatten_spatial)
-                    if yTBN.shape[1] != B:
-                        if raw.shape[0] == B:
-                            F = raw.mean(dim=1).contiguous()
-                        elif raw.shape[1] == B:
-                            F = raw.mean(dim=0).contiguous()
-                        elif raw.shape[-1] == B:
-                            F = raw.permute(0, 2, 1).contiguous().mean(dim=0).contiguous()
-                        else:
-                            raise RuntimeError(f"[SCA] out 3D no compatible con B={B}: {tuple(raw.shape)}")
-                    else:
-                        F = yTBN.mean(dim=0).contiguous()
+                if len(outs) == 1:
+                    raw = outs[0]
                 else:
-                    yTBN, _, _ = _to_TBN(raw, self._T_seq, self.cfg.flatten_spatial)
-                    if yTBN.ndim == 3 and yTBN.shape[1] == B:
-                        F = yTBN.mean(dim=0).contiguous()
-                    else:
-                        raise RuntimeError(f"[SCA] out ND no soportado: {tuple(raw.shape)} con B={B}")
+                    try:
+                        raw = torch.stack(outs, dim=0).contiguous()  # (T,B,...) esperado
+                    except Exception:
+                        raw = outs[-1]
 
+                # Normaliza robusto a (B,N) promediando T si procede
+                F = self._norm_BN(raw, B=B)  # (B,N)
                 if F.device != device:
                     F = F.to(device, non_blocking=True)
-                F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()  # (B,N), FP32 estable
+                F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()
 
-                # Binning y acumulación (modo robusto sin kernels raros)
+                # Binning y acumulación
                 bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
                 for b in range(num_bins):
                     mask = (bidx == b)
@@ -395,6 +436,7 @@ class SCA_SNN(BaseMethod):
             return 0.0
         S_vals: List[float] = []
         for Aprev in self._anchors_prev:
+            # KL simétrica bin-a-bin y conversión a [0,1]
             kl = _kl_symmetric(anchors_curr, Aprev)
             S = _similarity_from_kl(kl)
             S_vals.append(S)
@@ -427,15 +469,16 @@ class SCA_SNN(BaseMethod):
                     q = torch.tensor(1.0, device=g.device if isinstance(g, torch.Tensor) else dev)
                 self._R.add_(g / q)
                 self._Gacc.zero_()
-
         return torch.zeros((), dtype=torch.float32, device=dev)
 
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
+        # Hook pre-forward para detectar T
         if self._model_pre_hook_handle is None:
             self._model_pre_hook_handle = model.register_forward_pre_hook(
                 self._model_pre_forward_hook, with_kwargs=False
             )
 
+        # Selección de capa objetivo
         target = None
         if self.cfg.attach_to:
             target = _get_by_path(model, self.cfg.attach_to)
@@ -452,27 +495,36 @@ class SCA_SNN(BaseMethod):
         self._attached_name = getattr(target, "__class__", type(target)).__name__
         dev_target = self._ensure_target_device()
 
-        # Probe para dimensionar N
+        # Probe para dimensionar N (con orientación correcta y sin AMP)
         with torch.no_grad():
             try:
-                xb, _ = next(iter(train_loader))
+                xb, yb = next(iter(train_loader))
             except StopIteration:
                 raise RuntimeError("[SCA] El train_loader está vacío; no puedo inicializar SCA.")
             xb = xb.to(dev_target, non_blocking=True)
+            yb = yb.to(dev_target, non_blocking=True)
 
             def _probe(_m, _i, out):
                 yTBN, _, _ = _to_TBN(out, self._T_seq, self.cfg.flatten_spatial)
                 self._setup_per_neuron_state(yTBN.shape[-1], device=dev_target)
 
             h = target.register_forward_hook(_probe, with_kwargs=False)
-            _ = model(xb)
+            _ = _forward_with_cached_orientation(
+                model=model, x=xb, y=yb,
+                device=dev_target, use_amp=False,
+                phase_hint={"val": None}, phase="val"
+            )
             h.remove()
 
-        # Recoge anclas del task SIN aplicar máscara
+        # Recoge anclas del task SIN aplicar máscara (loader single-worker interno)
         self._suspend_mask = True
-        anchors_curr = self._collect_anchors_for_task(model, train_loader, dev_target)
+        anchors_loader = self._make_anchor_loader(train_loader)
+        anchors_curr = self._collect_anchors_for_task(model, anchors_loader, dev_target)
         self._suspend_mask = False
-        self._sim_min = self._estimate_similarity_min(anchors_curr)
+
+        # sim_min = max(sim_min_estimado, sim_min_configurada)
+        sim_floor = float(self.cfg.sim_min) if self.cfg.sim_min is not None else 0.0
+        self._sim_min = max(self._estimate_similarity_min(anchors_curr), sim_floor)
 
         print(f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
               f"bins={self.cfg.num_bins} | sim_min={self._sim_min:.3f}")
@@ -481,10 +533,9 @@ class SCA_SNN(BaseMethod):
                   f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
                   f"habit_decay={self.cfg.habit_decay}")
 
-        # Activa el hook de gating a partir de ahora (entrenamiento)
+        # Activa el hook de gating y el hook de gradiente
         if self._hook_handle is None:
             self._hook_handle = target.register_forward_hook(self._forward_hook, with_kwargs=False)
-
         if self._need_grad_hook and hasattr(target, "weight") and isinstance(target.weight, torch.Tensor):
             self._w_grad_hook = target.weight.register_hook(self._weight_grad_hook)
             self._need_grad_hook = False
@@ -499,9 +550,10 @@ class SCA_SNN(BaseMethod):
             return
         dev_target = self._ensure_target_device()
 
-        # Recoge y guarda anclas del task SIN aplicar máscara
+        # Recoge y guarda anclas del task SIN aplicar máscara (loader single-worker interno)
         self._suspend_mask = True
-        anchors = self._collect_anchors_for_task(model, train_loader, dev_target)
+        anchors_loader = self._make_anchor_loader(train_loader)
+        anchors = self._collect_anchors_for_task(model, anchors_loader, dev_target)
         self._suspend_mask = False
         self._anchors_prev.append(anchors.detach().clone())
 
@@ -535,6 +587,7 @@ class SCA_SNN(BaseMethod):
         self._R = None
         self._Gacc = None
         self._suspend_mask = False  # reset de seguridad
+        self._warned_shape_once = False
 
     # introspección
     def get_state(self) -> Dict[str, float]:
