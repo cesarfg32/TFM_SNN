@@ -42,7 +42,7 @@
         "verbose": false,
         "log_every": 65536,
 
-        "lam": 3000000,
+        "lambd": 3000000,
         "fisher_batches": 200
       },
       "tag": "sca_bins60_b052_t070_ab24+ewc_lam3e6"

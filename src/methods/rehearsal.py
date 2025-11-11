@@ -2,15 +2,19 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Iterator
+
 import random
 import torch
 from torch.utils.data import DataLoader, Dataset, TensorDataset
+
 from .base import BaseMethod
+
 
 @dataclass
 class RehearsalConfig:
     buffer_size: int = 10_000
     replay_ratio: float = 0.2
+
 
 class ReservoirBuffer:
     def __init__(self, buffer_size: int):
@@ -52,6 +56,7 @@ class ReservoirBuffer:
     def __len__(self) -> int:
         return len(self.reservoir)
 
+
 class _ReplayMixLoader:
     def __init__(self, task_loader: DataLoader, replay_loader: DataLoader, task_bs: int, replay_bs: int):
         self.task_loader = task_loader
@@ -85,17 +90,28 @@ class _ReplayMixLoader:
     def __len__(self):
         return len(self.task_loader)
 
+
 class RehearsalMethod(BaseMethod):
+    """Uniforme: acepta buffer_size y replay_ratio directos en __init__ + device/loss_fn."""
     name = "rehearsal"
 
-    def __init__(self, cfg: RehearsalConfig, *, device: Optional[torch.device] = None, loss_fn=None):
+    def __init__(
+        self,
+        *,
+        buffer_size: int = 10_000,
+        replay_ratio: float = 0.2,
+        device: Optional[torch.device] = None,
+        loss_fn=None,
+    ):
         super().__init__(device=device, loss_fn=loss_fn)
-        assert 0.0 <= cfg.replay_ratio <= 1.0, "replay_ratio debe estar en [0,1]"
-        self.cfg = cfg
-        self.buffer = ReservoirBuffer(cfg.buffer_size)
+        assert 0.0 <= float(replay_ratio) <= 1.0, "replay_ratio debe estar en [0,1]"
+        self.cfg = RehearsalConfig(buffer_size=int(buffer_size), replay_ratio=float(replay_ratio))
+        self.buffer = ReservoirBuffer(self.cfg.buffer_size)
         self._last_task_loader: Optional[DataLoader] = None
-        rr = int(round(cfg.replay_ratio * 100))
-        self.name = f"rehearsal_buf_{cfg.buffer_size}_rr_{rr}"
+        rr = int(round(self.cfg.replay_ratio * 100))
+        self.name = f"rehearsal_buf_{self.cfg.buffer_size}_rr_{rr}"
+
+        # flags de logging (opcionales)
         self.buffer_verbose: bool = False
         self.replay_verbose: bool = False
         self.replay_show_shapes: bool = False
@@ -119,6 +135,7 @@ class RehearsalMethod(BaseMethod):
     def prepare_train_loader(self, train_loader: DataLoader):
         if len(self.buffer) == 0 or self.cfg.replay_ratio <= 0.0:
             return train_loader
+
         total_bs = int(getattr(train_loader, "batch_size", None) or 0)
         if total_bs <= 0:
             try:
@@ -126,10 +143,12 @@ class RehearsalMethod(BaseMethod):
                 total_bs = int(xb.shape[0])
             except Exception:
                 total_bs = 8
+
         rep_bs = max(1, int(round(total_bs * self.cfg.replay_ratio)))
         task_bs = max(1, total_bs - rep_bs)
         if task_bs + rep_bs != total_bs:
             rep_bs = total_bs - task_bs
+
         if getattr(self, "replay_verbose", False):
             msg = f"[Rehearsal] mix: task_bs={task_bs} | replay_bs={rep_bs} | total_bs={total_bs} | buf_len={len(self.buffer)}"
             if getattr(self, "replay_show_shapes", False):
@@ -140,6 +159,7 @@ class RehearsalMethod(BaseMethod):
                 except Exception:
                     pass
             print(msg)
+
         replay_ds = self.buffer.as_dataset()
         replay_loader = DataLoader(
             replay_ds,

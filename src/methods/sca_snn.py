@@ -178,8 +178,9 @@ def _to_single_worker_loader_like(loader: DataLoader) -> DataLoader:
 class SCA_SNN(BaseMethod):
     name = "sca-snn"
 
-    def __init__(self, **kw):
-        super().__init__()  # integra con BaseMethod
+    def __init__(self, *, device: Optional[torch.device] = None, loss_fn: Optional[nn.Module] = None, **kw):
+        # Ahora inyectamos device/loss_fn de forma limpia
+        super().__init__(device=device, loss_fn=loss_fn)
         self.cfg = SCAConfig(**{k: v for k, v in kw.items() if k in SCAConfig.__annotations__})
         self.name = (
             f"{self.name}"

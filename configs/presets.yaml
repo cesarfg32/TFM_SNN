@@ -83,7 +83,7 @@ defaults: &defaults
   continual: &defaults_continual
     method: ewc
     params:
-      lam: 1.0e9
+      lambd: 1.0e9
       fisher_batches: 1000
 
   # Control de logs

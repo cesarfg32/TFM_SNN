@@ -14,7 +14,7 @@
       "seed": 42,
       "amp": true,
       "method": "ewc",
-      "method_kwargs": { "lam": 1e7, "fisher_batches": 200 }
+      "method_kwargs": { "lambd": 1e7, "fisher_batches": 200 }
     },
     {
       "tag": "smoke_sa_snn",

@@ -64,7 +64,7 @@
   {
     "method": "ewc",
     "params": {
-      "lam": 1000000.0
+      "lambd": 1000000.0
     },
     "tag": "std_ewc_lam_1e6"
   }

@@ -6,7 +6,7 @@
       "seed": 42,
       "amp": true,
       "method": "ewc",
-      "method_kwargs": { "lam": 2000000, "fisher_batches": 200 }
+      "method_kwargs": { "lambd": 2000000, "fisher_batches": 200 }
     },
     {
       "tag": "acc_ewc_lam5e6_f400",
@@ -14,7 +14,7 @@
       "seed": 42,
       "amp": true,
       "method": "ewc",
-      "method_kwargs": { "lam": 5000000, "fisher_batches": 400 }
+      "method_kwargs": { "lambd": 5000000, "fisher_batches": 400 }
     },
     {
       "tag": "acc_ewc_lam1e7_f400",
@@ -22,7 +22,7 @@
       "seed": 42,
       "amp": true,
       "method": "ewc",
-      "method_kwargs": { "lam": 10000000, "fisher_batches": 400 }
+      "method_kwargs": { "lambd": 10000000, "fisher_batches": 400 }
     },
 
     {
@@ -122,7 +122,7 @@
         "gamma_ratio": 0.33,
         "lambda_a": 0.9,
         "ema": 0.90,
-        "lam": 2000000,
+        "lambd": 2000000,
         "fisher_batches": 200
       }
     },
@@ -137,7 +137,7 @@
         "gamma_ratio": 0.35,
         "lambda_a": 1.0,
         "ema": 0.95,
-        "lam": 3000000,
+        "lambd": 3000000,
         "fisher_batches": 200
       }
     },
@@ -153,7 +153,7 @@
         "gamma_ratio": 0.30,
         "lambda_a": 1.2,
         "ema": 0.90,
-        "lam": 2000000,
+        "lambd": 2000000,
         "fisher_batches": 200
       }
     },
@@ -214,7 +214,7 @@
         "flatten_spatial": false,
         "assume_binary_spikes": false,
         "reset_counters_each_task": false,
-        "lam": 2000000,
+        "lambd": 2000000,
         "fisher_batches": 200
       }
     },
@@ -235,7 +235,7 @@
         "flatten_spatial": false,
         "assume_binary_spikes": false,
         "reset_counters_each_task": false,
-        "lam": 3000000,
+        "lambd": 3000000,
         "fisher_batches": 200
       }
     },
@@ -305,7 +305,7 @@
         "habit_decay": 0.99,
         "verbose": false,
         "log_every": 65536,
-        "lam": 2000000,
+        "lambd": 2000000,
         "fisher_batches": 200
       }
     },
@@ -329,7 +329,7 @@
         "habit_decay": 0.99,
         "verbose": false,
         "log_every": 65536,
-        "lam": 3000000,
+        "lambd": 3000000,
         "fisher_batches": 200
       }
     }
