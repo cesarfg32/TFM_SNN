@@ -128,10 +128,9 @@ fast:
     lr: 6.0e-4
     epochs: 2 # 12
     batch_size: 320
-    es_patience: 2
-    es_min_delta: 7.5e-4
-    compile: true
-    compile_mode: reduce-overhead
+    es_patience: null   # 2
+    es_min_delta: null  # 7.5e-4
+    compile: false
   continual:
     <<: *defaults_continual
   prep:
@@ -152,8 +151,8 @@ std:
     lr: 5.0e-4
     epochs: 16
     batch_size: 256
-    es_patience: 3
-    es_min_delta: 5.0e-4
+    es_patience: null   # 3
+    es_min_delta: null  # 5.0e-4
     compile: false
   continual:
     <<: *defaults_continual

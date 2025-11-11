@@ -101,7 +101,7 @@ def make_loaders_from_csvs(
     # --- Novedades ---
     aug_train: Optional[AugmentConfig] = None,
     balance_train: bool = False,
-    balance_bins: int = 21,
+    balance_bins: int = 50,
     balance_smooth_eps: float = 1e-3,
     # pin memory device (se propaga si la versión de DataLoader lo soporta)
     pin_memory_device: str = "cuda",

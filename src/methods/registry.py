@@ -22,12 +22,12 @@ ALLOWED_KEYS: Dict[str, set[str]] = {
     "sa-snn": {
         "attach_to", "k", "tau", "th_min", "th_max", "p", "vt_scale",
         "flatten_spatial", "assume_binary_spikes", "reset_counters_each_task",
-+        "ema_beta","update_on_eval"
+        "ema_beta", "update_on_eval"
     },
     "as-snn": {
         "measure_at", "attach_to", "gamma_ratio", "lambda_a", "ema",
         "do_synaptic_scaling", "scale_clip", "scale_bias", "penalty_mode",
-        "activity_verbose", "activity_every", "eps", "name_suffix",
+        "activity_verbose", "activity_every", "eps", "name_suffix"
     },
     "sca-snn": {
         "attach_to", "flatten_spatial", "num_bins", "anchor_batches",
@@ -38,6 +38,7 @@ ALLOWED_KEYS: Dict[str, set[str]] = {
     "naive": set(),
     "colanet": {"attach_to", "flatten_spatial"},
 }
+
 GENERIC_TO_DROP = {
     "T", "epochs", "batch_size", "lr", "es_patience", "es_min_delta",
     "compile", "compile_mode", "amp", "encoder", "gain"

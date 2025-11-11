@@ -1,4 +1,3 @@
-# tools/sweep_methods.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -18,9 +17,7 @@ from src.utils_components import build_components_for
 from src.runner import run_continual
 
 # ------------------------------- carga del sweep -------------------------------
-
 _POSSIBLE_KEYS = ("runs", "exps", "experiments", "sweep")
-
 
 def _read_sweep(path: Path):
     if not path.exists():
@@ -57,21 +54,29 @@ def _read_sweep(path: Path):
             f"alguna de estas claves: {', '.join(_POSSIBLE_KEYS)}. "
             f"Claves detectadas: {keys_preview}"
         )
-
     raise TypeError("El sweep debe ser una lista o un dict con una lista de runs.")
-
 
 def _norm_run(run_spec):
     """
-    Devuelve dict canónico con keys: method(str), params(dict), tag(str|None).
+    Devuelve dict canónico con keys:
+      method(str), params(dict), tag(str|None),
+      preset(str|None), seed(int|None), amp(bool|None)
 
     Admite:
       - "ewc"
       - {"method":"ewc", "params": {...}, "tag": "..."}
       - {"method":"ewc", "method_kwargs": {...}, "tag": "..."}  # compat
+      - y overrides opcionales: "preset", "seed", "amp"
     """
     if isinstance(run_spec, str):
-        return {"method": run_spec, "params": {}, "tag": None}
+        return {
+            "method": run_spec,
+            "params": {},
+            "tag": None,
+            "preset": None,
+            "seed": None,
+            "amp": None,
+        }
 
     if isinstance(run_spec, dict):
         # Nombre del método
@@ -90,10 +95,22 @@ def _norm_run(run_spec):
         tag = run_spec.get("tag", None)
         tag = str(tag) if tag is not None else None
 
-        return {"method": method, "params": params, "tag": tag}
+        # Overrides opcionales
+        preset = run_spec.get("preset", None)
+        preset = str(preset) if preset is not None else None
+        seed = run_spec.get("seed", None)
+        amp  = run_spec.get("amp",  None)
+
+        return {
+            "method": method,
+            "params": params,
+            "tag": tag,
+            "preset": preset,
+            "seed": seed,
+            "amp": amp,
+        }
 
     raise TypeError(f"Tipo de run no soportado: {type(run_spec)}")
-
 
 def _build_task_list_from_cfg(cfg):
     prep = cfg.get("prep", {}) or {}
@@ -102,64 +119,68 @@ def _build_task_list_from_cfg(cfg):
         runs = ["circuito1", "circuito2"]
     return [{"name": str(r)} for r in runs]
 
-
 # ---------------------------------- CLI main ----------------------------------
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preset", required=True, help="Nombre ('fast') o ruta a YAML.")
+    ap.add_argument("--preset", required=True, help="Nombre ('fast'/'std'/'accurate') o ruta a YAML.")
     ap.add_argument("--sweep-file", required=True, help="Ruta a JSON con runs.")
     ap.add_argument("--out", default="outputs", help="Carpeta de salida raíz.")
     args = ap.parse_args()
 
-    # 1) Carga preset base
-    base_cfg = load_preset(args.preset)
-
-    # 2) Lee y normaliza runs
+    # 1) Lee y normaliza runs
     runs_in = _read_sweep(Path(args.sweep_file))
     runs = [_norm_run(r) for r in runs_in]
 
-    # 3) Construye componentes (dataset/modelo/tfm)
-    make_loader_fn, make_model_fn, tfm = build_components_for(base_cfg)
-
     out_root = Path(args.out)
 
-    # -------- PRE-FLIGHT: listar todos los runs antes de ejecutar --------
+    # PRE-LISTADO indicando qué preset se usará finalmente por run
     print(f"[INFO] {len(runs)} runs a ejecutar. OUT={out_root}")
     for i, r in enumerate(runs, start=1):
-        method, params, tag = r["method"], r["params"], r["tag"]
-        pretty = f"{method} :: {tag}" if tag else method
-        print(f"  {i:02d}. {pretty}")
-    print()  # línea en blanco
-    # ---------------------------------------------------------------------
+        pretty = f"{r['method']} :: {r['tag']}" if r["tag"] else r["method"]
+        eff_preset = r["preset"] or args.preset
+        print(f"  {i:02d}. {pretty}  (preset={eff_preset})")
+    print()
 
-    # 4) Ejecuta cada run sobreescribiendo cfg.continual y naming.tag
+    # 2) Ejecuta
     for i, r in enumerate(runs, start=1):
-        method, params, tag = r["method"], r["params"], r["tag"]
+        # Carga preset efectivo del run (o el del CLI si no especifica)
+        eff_preset = r["preset"] or args.preset
+        cfg = load_preset(eff_preset)
 
-        cfg = deepcopy(base_cfg)
+        # Overrides de continual
         cfg.setdefault("continual", {})
-        cfg["continual"]["method"] = method
+        cfg["continual"]["method"] = r["method"]
         merged = dict(cfg["continual"].get("params", {}) or {})
-        merged.update(params or {})
+        merged.update(r["params"] or {})
         cfg["continual"]["params"] = merged
 
-        if tag:
+        # Tag
+        if r["tag"]:
             cfg.setdefault("naming", {})
-            cfg["naming"]["tag"] = tag
+            cfg["naming"]["tag"] = r["tag"]
 
+        # Overrides de seed/amp si vienen en el run
+        if r["seed"] is not None:
+            cfg.setdefault("data", {})
+            cfg["data"]["seed"] = int(r["seed"])
+        if r["amp"] is not None:
+            cfg.setdefault("optim", {})
+            cfg["optim"]["amp"] = bool(r["amp"])
+
+        # Como el preset puede cambiar por run, construimos componentes por run
+        make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
         task_list = _build_task_list_from_cfg(cfg)
-        pretty = f"{method} :: {tag}" if tag else method
 
+        pretty = f"{r['method']} :: {r['tag']}" if r["tag"] else r["method"]
         try:
-            print(f"\n=== [{i}/{len(runs)}] {method} | tag={tag or 'exps'} ===\n")
+            print(f"\n=== [{i}/{len(runs)}] {r['method']} | tag={r['tag'] or 'exps'} | preset={eff_preset} ===\n")
             run_continual(
                 task_list=task_list,
                 make_loader_fn=make_loader_fn,
                 make_model_fn=make_model_fn,
                 tfm=tfm,
                 cfg=cfg,
-                preset_name=(base_cfg.get('_meta', {}).get('preset_key') or args.preset),
+                preset_name=(cfg.get('_meta', {}).get('preset_key') or eff_preset),
                 out_root=out_root,
                 verbose=True,
             )
@@ -167,7 +188,6 @@ def main():
             print(f"[ERROR] {type(e).__name__}: {e}")
 
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

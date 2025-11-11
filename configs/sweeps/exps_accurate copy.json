@@ -1,0 +1,32 @@
+{
+  "exps": [
+    { "method": "ewc", "params": { "lam": 2000000,  "fisher_batches": 200 }, "tag": "acc_ewc_lam2e6_f200" },
+    { "method": "ewc", "params": { "lam": 5000000,  "fisher_batches": 400 }, "tag": "acc_ewc_lam5e6_f400" },
+    { "method": "ewc", "params": { "lam": 10000000, "fisher_batches": 400 }, "tag": "acc_ewc_lam1e7_f400" },
+
+    { "method": "as-snn", "params": { "measure_at": "input", "gamma_ratio": 0.30, "lambda_a": 0.9,  "ema": 0.90 }, "tag": "acc_as_input_gr030_lam0p9_e090" },
+    { "method": "as-snn", "params": { "measure_at": "input", "gamma_ratio": 0.33, "lambda_a": 0.9,  "ema": 0.90 }, "tag": "acc_as_input_gr033_lam0p9_e090" },
+    { "method": "as-snn", "params": { "measure_at": "input", "gamma_ratio": 0.35, "lambda_a": 1.0,  "ema": 0.95 }, "tag": "acc_as_input_gr035_lam1p0_e095" },
+    { "method": "as-snn", "params": { "measure_at": "input", "gamma_ratio": 0.36, "lambda_a": 1.2,  "ema": 0.95 }, "tag": "acc_as_input_gr036_lam1p2_e095" },
+
+    { "method": "as-snn", "params": { "measure_at": "modules", "attach_to": "f6", "gamma_ratio": 0.30, "lambda_a": 1.2, "ema": 0.90, "do_synaptic_scaling": false }, "tag": "acc_as_modules_f6_gr030_lam1p2" },
+    { "method": "as-snn", "params": { "measure_at": "modules", "attach_to": "f6", "gamma_ratio": 0.33, "lambda_a": 1.2, "ema": 0.90, "do_synaptic_scaling": true, "scale_clip": [0.6, 1.8], "scale_bias": false }, "tag": "acc_as_modules_f6_gr033_lam1p2_scale" },
+
+    { "method": "as-snn+ewc", "params": { "measure_at": "input", "gamma_ratio": 0.33, "lambda_a": 0.9, "ema": 0.90, "lam": 2000000, "fisher_batches": 200 }, "tag": "acc_as_input_gr033_lam0p9+ewc_lam2e6_f200" },
+    { "method": "as-snn+ewc", "params": { "measure_at": "input", "gamma_ratio": 0.35, "lambda_a": 1.0, "ema": 0.95, "lam": 3000000, "fisher_batches": 200 }, "tag": "acc_as_input_gr035_lam1p0_e095+ewc_lam3e6_f200" },
+    { "method": "as-snn+ewc", "params": { "measure_at": "modules", "attach_to": "f6", "gamma_ratio": 0.30, "lambda_a": 1.2, "ema": 0.90, "lam": 2000000, "fisher_batches": 200 }, "tag": "acc_as_modules_f6_gr030_lam1p2+ewc_lam2e6_f200" },
+
+    { "method": "sa-snn", "params": { "attach_to": "f6", "k": 0.15, "tau": 28.0, "vt_scale": 1.10, "th_min": 1.0, "th_max": 2.0, "p": 3000000, "flatten_spatial": false, "assume_binary_spikes": false, "reset_counters_each_task": false }, "tag": "acc_sa_ratio15_tau28_vt1p10_p3m" },
+    { "method": "sa-snn", "params": { "attach_to": "f6", "k": 0.12, "tau": 32.0, "vt_scale": 1.15, "th_min": 1.0, "th_max": 2.0, "p": 3000000, "flatten_spatial": false, "assume_binary_spikes": false, "reset_counters_each_task": false }, "tag": "acc_sa_ratio12_tau32_vt1p15_p3m" },
+
+    { "method": "sa-snn+ewc", "params": { "attach_to": "f6", "k": 0.15, "tau": 28.0, "vt_scale": 1.10, "th_min": 1.0, "th_max": 2.0, "p": 3000000, "flatten_spatial": false, "assume_binary_spikes": false, "reset_counters_each_task": false, "lam": 2000000, "fisher_batches": 200 }, "tag": "acc_sa_ratio15_tau28_vt1p10_p3m+ewc_lam2e6_f200" },
+    { "method": "sa-snn+ewc", "params": { "attach_to": "f6", "k": 0.12, "tau": 32.0, "vt_scale": 1.15, "th_min": 1.0, "th_max": 2.0, "p": 3000000, "flatten_spatial": false, "assume_binary_spikes": false, "reset_counters_each_task": false, "lam": 3000000, "fisher_batches": 200 }, "tag": "acc_sa_ratio12_tau32_vt1p15_p3m+ewc_lam3e6_f200" },
+
+
+    { "method": "sca-snn", "params": { "attach_to": "f6", "flatten_spatial": false, "num_bins": 60, "anchor_batches": 24, "bin_lo": -1.0, "bin_hi": 1.0, "max_per_bin": 1024, "beta": 0.52, "bias": 0.00, "soft_mask_temp": 0.30, "habit_decay": 0.99, "verbose": false, "log_every": 65536 }, "tag": "acc_sca_bins60_b052_t030_ab24" },
+    { "method": "sca-snn", "params": { "attach_to": "f6", "flatten_spatial": false, "num_bins": 80, "anchor_batches": 24, "bin_lo": -1.0, "bin_hi": 1.0, "max_per_bin": 1024, "beta": 0.60, "bias": 0.05, "soft_mask_temp": 0.50, "habit_decay": 0.99, "verbose": false, "log_every": 65536 }, "tag": "acc_sca_bins80_b060_bias005_t050_ab24" },
+
+    { "method": "sca-snn+ewc", "params": { "attach_to": "f6", "flatten_spatial": false, "num_bins": 60, "anchor_batches": 24, "bin_lo": -1.0, "bin_hi": 1.0, "max_per_bin": 1024, "beta": 0.52, "bias": 0.00, "soft_mask_temp": 0.30, "habit_decay": 0.99, "verbose": false, "log_every": 65536, "lam": 2000000, "fisher_batches": 200 }, "tag": "acc_sca_bins60_b052_t030_ab24+ewc_lam2e6_f200" },
+    { "method": "sca-snn+ewc", "params": { "attach_to": "f6", "flatten_spatial": false, "num_bins": 80, "anchor_batches": 24, "bin_lo": -1.0, "bin_hi": 1.0, "max_per_bin": 1024, "beta": 0.60, "bias": 0.05, "soft_mask_temp": 0.50, "habit_decay": 0.99, "verbose": false, "log_every": 65536, "lam": 3000000, "fisher_batches": 200 }, "tag": "acc_sca_bins80_b060_bias005_t050_ab24+ewc_lam3e6_f200" }
+  ]
+}
