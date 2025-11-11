@@ -1,12 +1,5 @@
 {
   "experiments": [
-    { "tag": "fast_sca_bins20_b045_t080_ab24_flat1_sim002", "preset": "fast", "seed": 42, "amp": true,
-      "method": "sca-snn", "method_kwargs": {
-        "attach_to": "f6", "flatten_spatial": true,
-        "num_bins": 20, "anchor_batches": 24, "bin_lo": -1.0, "bin_hi": 1.0,
-        "max_per_bin": 1024, "beta": 0.45, "bias": 0.00,
-        "soft_mask_temp": 0.80, "habit_decay": 0.99, "sim_min": 0.02
-      } },
 
     { "tag": "fast_sca_bins50_b035_t070_ab16_flat0_sim002", "preset": "fast", "seed": 42, "amp": true,
       "method": "sca-snn", "method_kwargs": {

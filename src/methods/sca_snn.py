@@ -1,3 +1,4 @@
+# src/methods/sca_snn.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from dataclasses import dataclass
@@ -8,20 +9,20 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .base import BaseMethod
-from src.nn_io import _forward_with_cached_orientation  # orientación/dtype consistentes
+from src.nn_io import _forward_with_cached_orientation  # <<< clave: orientación consistente
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
 # ------------------------------------------------------------
 @dataclass
 class SCAConfig:
-    attach_to: Optional[str] = None   # p.ej., "f6" en PilotNetSNN; None -> primera Linear
+    attach_to: Optional[str] = None   # p.ej. "f6" en PilotNetSNN; None -> primera Linear
     flatten_spatial: bool = True
 
     # Similaridad (anchors)
     num_bins: int = 50
     bin_lo: float = -1.0
-    bin_hi: float = 1.0
+    bin_hi: float =  1.0
     anchor_batches: int = 8
     max_per_bin: int = 1024
 
@@ -30,9 +31,6 @@ class SCAConfig:
     bias: float = 0.0
     habit_decay: float = 0.99
     soft_mask_temp: float = 0.0
-
-    # Límite inferior opcional para la similaridad (suelo externo)
-    sim_min: Optional[float] = None
 
     # logging
     verbose: bool = False
@@ -133,6 +131,47 @@ def _similarity_from_kl(kl_vals: torch.Tensor) -> float:
     s = (1.0 / (1.0 + kl_vals))
     s = torch.clamp(s, 0.0, 1.0)
     return float(s.mean().item())
+
+
+def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | None = None) -> torch.Tensor:
+    idx = torch.nan_to_num(idx, nan=0.0, posinf=0.0, neginf=0.0)
+    idx = idx.to(torch.int64).contiguous().clamp_(0, n_bins - 1)
+    if idx.numel() == 0:
+        dev = idx.device
+        dt = (weights.dtype if (weights is not None and isinstance(weights, torch.Tensor)) else torch.float32)
+        return torch.zeros(n_bins, device=dev, dtype=dt)
+    if weights is None:
+        return torch.bincount(idx, minlength=n_bins).to(torch.float32)
+    weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
+    return torch.bincount(idx, weights=weights, minlength=n_bins)
+
+
+def _topk_safe(score: torch.Tensor, k: int) -> torch.Tensor:
+    s = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+    k = max(1, int(k))
+    if k >= s.numel():
+        return torch.arange(s.numel(), device=s.device)
+    return torch.topk(s, k=k, largest=True, sorted=False).indices
+
+
+def _to_single_worker_loader_like(loader: DataLoader) -> DataLoader:
+    """Copia un DataLoader con num_workers=0 y sin pin/persistentes."""
+    try:
+        return DataLoader(
+            loader.dataset,
+            batch_size=loader.batch_size,
+            sampler=getattr(loader, "sampler", None),
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+            persistent_workers=False,
+            prefetch_factor=1,
+            drop_last=False,
+            collate_fn=loader.collate_fn,
+            timeout=0,
+        )
+    except Exception:
+        return loader
 
 
 # ---------------------------- método ----------------------------
@@ -320,115 +359,109 @@ class SCA_SNN(BaseMethod):
                 pass
         return torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
 
-    # -------- loader anclas single-worker (interno, Strategy) --------
-    def _make_anchor_loader(self, loader: DataLoader) -> DataLoader:
-        try:
-            return DataLoader(
-                loader.dataset,
-                batch_size=loader.batch_size,
-                sampler=getattr(loader, "sampler", None),
-                shuffle=False,
-                num_workers=0,
-                pin_memory=False,
-                persistent_workers=False,
-                prefetch_factor=1,
-                drop_last=False,
-                collate_fn=loader.collate_fn,
-                timeout=0,
-            )
-        except Exception:
-            # en caso extremo, usar el original
-            return loader
-
     # -------- anchors (por tarea) --------
     @torch.no_grad()
     def _collect_anchors_for_task(self, model: nn.Module, loader: DataLoader, device: torch.device) -> torch.Tensor:
         """Calcula medias de activación por bin (num_bins, N) en la capa objetivo."""
         assert self._target is not None and self._N is not None
 
-        num_bins = int(self.cfg.num_bins)
-        lo, hi = float(self.cfg.bin_lo), float(self.cfg.bin_hi)
-        max_batches = int(self.cfg.anchor_batches)
+        def _run_collect(active_loader: DataLoader) -> torch.Tensor:
+            num_bins = int(self.cfg.num_bins)
+            lo, hi = float(self.cfg.bin_lo), float(self.cfg.bin_hi)
+            max_batches = int(self.cfg.anchor_batches)
 
-        # Hook temporal: acumula TODAS las salidas de la capa objetivo a lo largo de T
-        grab: Dict[str, List[torch.Tensor]] = {"outs": []}
+            # Hook temporal: acumula TODAS las salidas de la capa objetivo a lo largo de T
+            grab: Dict[str, List[torch.Tensor]] = {"outs": []}
 
-        def _cap_hook(_m, _inp, out):
-            if torch.is_tensor(out):
-                grab["outs"].append(out.detach())
+            def _cap_hook(_m, _inp, out):
+                if torch.is_tensor(out):
+                    grab["outs"].append(out.detach())
 
-        tmp_handle = self._target.register_forward_hook(_cap_hook, with_kwargs=False)
+            tmp_handle = self._target.register_forward_hook(_cap_hook, with_kwargs=False)
 
-        cnt_per_bin = [0 for _ in range(num_bins)]
-        sum_per_bin = [torch.zeros(self._N, dtype=torch.float32, device=device) for _ in range(num_bins)]
+            cnt_per_bin = [0 for _ in range(num_bins)]
+            sum_per_bin = [torch.zeros(self._N, dtype=torch.float32, device=device) for _ in range(num_bins)]
 
-        was_training = model.training
-        model.eval()
-        try:
-            batches_seen = 0
-            phase_hint = {"val": None}
-            for x, y in loader:
-                x = x.to(device, non_blocking=True)
-                y = y.to(device, non_blocking=True).view(-1)
-                y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
-                B = int(y.shape[0])
-
-                _ = _forward_with_cached_orientation(
-                    model=model, x=x, y=y,
-                    device=device, use_amp=False,     # anchors en FP32 estable
-                    phase_hint=phase_hint, phase="val"
-                )
-
-                # Extrae y apila las salidas capturadas (T llamadas al hook)
-                outs = grab["outs"]
-                grab["outs"] = []
-                if len(outs) == 0:
-                    continue
-                if len(outs) == 1:
-                    raw = outs[0]
-                else:
-                    try:
-                        raw = torch.stack(outs, dim=0).contiguous()  # (T,B,...) esperado
-                    except Exception:
-                        raw = outs[-1]
-
-                # Normaliza robusto a (B,N) promediando T si procede
-                F = self._norm_BN(raw, B=B)  # (B,N)
-                if F.device != device:
-                    F = F.to(device, non_blocking=True)
-                F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()
-
-                # Binning y acumulación
-                bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
-                for b in range(num_bins):
-                    mask = (bidx == b)
-                    if mask.any():
-                        take = F[mask]
-                        room = int(self.cfg.max_per_bin) - cnt_per_bin[b]
-                        if room <= 0:
-                            continue
-                        if take.shape[0] > room:
-                            take = take[:room]
-                        sum_per_bin[b].add_(torch.nan_to_num(take.sum(dim=0), nan=0.0, posinf=0.0, neginf=0.0))
-                        cnt_per_bin[b] += int(take.shape[0])
-
-                batches_seen += 1
-                if batches_seen >= max_batches:
-                    break
-        finally:
+            was_training = model.training
+            model.eval()
             try:
-                tmp_handle.remove()
-            except Exception:
-                pass
-            if was_training:
-                model.train()
+                batches_seen = 0
+                phase_hint = {"val": None}
+                for x, y in active_loader:
+                    x = x.to(device, non_blocking=True)
+                    y = y.to(device, non_blocking=True).view(-1)
+                    y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
+                    B = int(y.shape[0])
 
-        anchors = torch.stack([
-            (sum_per_bin[b] / max(1, cnt_per_bin[b])) for b in range(num_bins)
-        ], dim=0).contiguous()  # (num_bins, N)
-        anchors = torch.nan_to_num(anchors, nan=0.0, posinf=0.0, neginf=0.0)
-        anchors = _row_normalize_pos(anchors)
-        return anchors
+                    # Ejecuta forward con orientación y dtype consistentes, sin AMP
+                    _ = _forward_with_cached_orientation(
+                        model=model, x=x, y=y,
+                        device=device, use_amp=False,
+                        phase_hint=phase_hint, phase="val"
+                    )
+
+                    # Extrae y apila las salidas capturadas (T llamadas al hook)
+                    outs = grab["outs"]
+                    grab["outs"] = []
+                    if len(outs) == 0:
+                        continue
+                    if len(outs) == 1:
+                        raw = outs[0]
+                    else:
+                        try:
+                            # Cada out esperado como (B, N) → (T, B, N)
+                            raw = torch.stack(outs, dim=0).contiguous()
+                        except Exception:
+                            raw = outs[-1]
+
+                    # Normaliza robusto a (B,N) promediando T si procede
+                    F = self._norm_BN(raw, B=B)  # (B,N)
+                    if F.device != device:
+                        F = F.to(device, non_blocking=True)
+                    F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+
+                    # Binning y acumulación
+                    bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
+                    for b in range(num_bins):
+                        mask = (bidx == b)
+                        if mask.any():
+                            take = F[mask]
+                            room = int(self.cfg.max_per_bin) - cnt_per_bin[b]
+                            if room <= 0:
+                                continue
+                            if take.shape[0] > room:
+                                take = take[:room]
+                            sum_per_bin[b].add_(torch.nan_to_num(take.sum(dim=0), nan=0.0, posinf=0.0, neginf=0.0))
+                            cnt_per_bin[b] += int(take.shape[0])
+
+                    batches_seen += 1
+                    if batches_seen >= max_batches:
+                        break
+            finally:
+                try:
+                    tmp_handle.remove()
+                except Exception:
+                    pass
+                if was_training:
+                    model.train()
+
+            anchors = torch.stack([
+                (sum_per_bin[b] / max(1, cnt_per_bin[b])) for b in range(num_bins)
+            ], dim=0).contiguous()  # (num_bins, N)
+            anchors = torch.nan_to_num(anchors, nan=0.0, posinf=0.0, neginf=0.0)
+            anchors = _row_normalize_pos(anchors)
+            return anchors
+
+        try:
+            return _run_collect(loader)
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}".lower()
+            triggers = ("bus error", "unexpected bus error", "shared memory", "shm", "dataloader worker", "worker exited", "multiprocessing")
+            if any(t in msg for t in triggers):
+                print("[SCA] WARN: caída de worker durante anchors. Reintentando con num_workers=0…")
+                safe_loader = _to_single_worker_loader_like(loader)
+                return _run_collect(safe_loader)
+            raise
 
     @torch.no_grad()
     def _estimate_similarity_min(self, anchors_curr: torch.Tensor) -> float:
@@ -436,7 +469,6 @@ class SCA_SNN(BaseMethod):
             return 0.0
         S_vals: List[float] = []
         for Aprev in self._anchors_prev:
-            # KL simétrica bin-a-bin y conversión a [0,1]
             kl = _kl_symmetric(anchors_curr, Aprev)
             S = _similarity_from_kl(kl)
             S_vals.append(S)
@@ -472,13 +504,11 @@ class SCA_SNN(BaseMethod):
         return torch.zeros((), dtype=torch.float32, device=dev)
 
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
-        # Hook pre-forward para detectar T
         if self._model_pre_hook_handle is None:
             self._model_pre_hook_handle = model.register_forward_pre_hook(
                 self._model_pre_forward_hook, with_kwargs=False
             )
 
-        # Selección de capa objetivo
         target = None
         if self.cfg.attach_to:
             target = _get_by_path(model, self.cfg.attach_to)
@@ -516,15 +546,11 @@ class SCA_SNN(BaseMethod):
             )
             h.remove()
 
-        # Recoge anclas del task SIN aplicar máscara (loader single-worker interno)
+        # Recoge anclas del task SIN aplicar máscara
         self._suspend_mask = True
-        anchors_loader = self._make_anchor_loader(train_loader)
-        anchors_curr = self._collect_anchors_for_task(model, anchors_loader, dev_target)
+        anchors_curr = self._collect_anchors_for_task(model, train_loader, dev_target)
         self._suspend_mask = False
-
-        # sim_min = max(sim_min_estimado, sim_min_configurada)
-        sim_floor = float(self.cfg.sim_min) if self.cfg.sim_min is not None else 0.0
-        self._sim_min = max(self._estimate_similarity_min(anchors_curr), sim_floor)
+        self._sim_min = self._estimate_similarity_min(anchors_curr)
 
         print(f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
               f"bins={self.cfg.num_bins} | sim_min={self._sim_min:.3f}")
@@ -533,7 +559,7 @@ class SCA_SNN(BaseMethod):
                   f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
                   f"habit_decay={self.cfg.habit_decay}")
 
-        # Activa el hook de gating y el hook de gradiente
+        # Activa el hook de gating
         if self._hook_handle is None:
             self._hook_handle = target.register_forward_hook(self._forward_hook, with_kwargs=False)
         if self._need_grad_hook and hasattr(target, "weight") and isinstance(target.weight, torch.Tensor):
@@ -550,10 +576,9 @@ class SCA_SNN(BaseMethod):
             return
         dev_target = self._ensure_target_device()
 
-        # Recoge y guarda anclas del task SIN aplicar máscara (loader single-worker interno)
+        # Recoge y guarda anclas del task SIN aplicar máscara
         self._suspend_mask = True
-        anchors_loader = self._make_anchor_loader(train_loader)
-        anchors = self._collect_anchors_for_task(model, anchors_loader, dev_target)
+        anchors = self._collect_anchors_for_task(model, train_loader, dev_target)
         self._suspend_mask = False
         self._anchors_prev.append(anchors.detach().clone())
 

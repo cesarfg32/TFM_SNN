@@ -104,7 +104,6 @@ def _forgetting_summary(names: List[str], per_task: Dict[str, Dict[str, float]])
             summary["circuito2_forget_abs"] = summary[f"task_{idx}_forget_abs"]
             summary["circuito2_forget_rel"] = summary[f"task_{idx}_forget_rel"]
         try:
-            # FIX: sin paréntesis extra
             if isinstance(fr, (int, float)) and math.isfinite(float(fr)):
                 rels.append(float(fr))
         except Exception:
@@ -195,6 +194,54 @@ def _load_checkpoint_if_exists(
                 continue
     return False
 
+# Detectores de errores típicos
+_ERR_TRIGGERS_SHM = ("bus error", "unexpected bus error", "shared memory", "shm", "dataloader worker", "worker exited", "multiprocessing")
+_ERR_TRIGGERS_ENOSPC = ("no space left on device", "errno 28")
+
+def _is_trigger(msg: str, triggers: Tuple[str, ...]) -> bool:
+    m = msg.lower()
+    return any(t in m for t in triggers)
+
+def _rebuild_loaders_safe(
+    make_loader_fn,
+    task: dict,
+    bs_same: int,
+    *,
+    encoder: str,
+    T: int,
+    gain: float,
+    tfm,
+    seed: int,
+    dl_kwargs: dict,
+    verbose: bool,
+):
+    safe_kwargs = dict(dl_kwargs)
+    safe_kwargs.update(dict(
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False,
+        prefetch_factor=1,
+        timeout=0,
+    ))
+    if verbose:
+        print(f"[WARN] Rehaciendo loaders en modo seguro (num_workers=0, prefetch_factor=1, pin_memory=False)")
+    tr2, va2, te2 = make_loader_fn(
+        task=task, batch_size=bs_same, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **safe_kwargs
+    )
+    return tr2, va2, te2
+
+def _eval_with_fallback(loader, model, loss_fn, device, use_amp):
+    try:
+        return eval_loader(loader, model, loss_fn=loss_fn, device=device, use_amp=use_amp)
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}".lower()
+        if _is_trigger(msg, _ERR_TRIGGERS_SHM):
+            # Reintento con loader de un solo worker
+            loader_safe = _to_single_worker_loader(loader)
+            return eval_loader(loader_safe, model, loss_fn=loss_fn, device=device, use_amp=use_amp)
+        else:
+            raise
+
 # ================================================
 def run_continual(
     task_list: List[dict],
@@ -221,13 +268,13 @@ def run_continual(
 
     # ------------- DataLoader kwargs -------------
     dl_kwargs = dict(
-        num_workers         = int(data["num_workers"]),
-        pin_memory          = bool(data["pin_memory"]),
-        persistent_workers  = bool(data["persistent_workers"]),
-        prefetch_factor     = data["prefetch_factor"],
-        drop_last           = True,
-        pin_memory_device   = data.get("pin_memory_device", "cuda"),
-        timeout             = 0,
+        num_workers          = int(data["num_workers"]),
+        pin_memory           = bool(data["pin_memory"]),
+        persistent_workers   = bool(data["persistent_workers"]),
+        prefetch_factor      = data["prefetch_factor"],
+        drop_last            = True,
+        pin_memory_device    = data.get("pin_memory_device", "cuda"),
+        timeout              = 0,
     )
     mp_ctx = _get_mp_ctx()
     if mp_ctx is not None and dl_kwargs["num_workers"] > 0:
@@ -363,6 +410,8 @@ def run_continual(
                     f"\n--- Tarea {i}/{len(task_list)}: {name} | preset={preset_name} | method={method_obj.name} "
                     f"| B={bs} T={T} AMP={use_amp} | enc={encoder} ---"
                 )
+
+            # Construcción loaders
             tr, va, te = make_loader_fn(
                 task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
             )
@@ -388,27 +437,81 @@ def run_continual(
             # Telemetría inicio de tarea
             log_telemetry_event(out_dir, {"event": "task_start", "task_idx": i, "task_name": name})
 
-            # Hooks de Strategy (SCA/SA/AS/Rehearsal/EWC actúan internamente)
-            method_obj.before_task(model, tr, va)
+            # ---- Fallback en before_task (p. ej. SCA puede acceder al loader) ----
+            try:
+                method_obj.before_task(model, tr, va)
+            except Exception as e:
+                msg = f"{type(e).__name__}: {e}".lower()
+                if _is_trigger(msg, _ERR_TRIGGERS_SHM):
+                    print("[WARN] before_task falló (SHM/workers). Reintentando con num_workers=0…")
+                    tr = _to_single_worker_loader(tr)
+                    try:
+                        method_obj.before_task(model, tr, va)
+                    except Exception as e2:
+                        msg2 = f"{type(e2).__name__}: {e2}".lower()
+                        if _is_trigger(msg2, _ERR_TRIGGERS_SHM) or _is_trigger(msg2, _ERR_TRIGGERS_ENOSPC):
+                            tr, va, te = _rebuild_loaders_safe(
+                                make_loader_fn, t, bs,
+                                encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed,
+                                dl_kwargs=dl_kwargs, verbose=verbose
+                            )
+                            tr = method_obj.prepare_train_loader(tr) if hasattr(method_obj, "prepare_train_loader") else tr
+                            method_obj.before_task(model, tr, va)
+                        else:
+                            raise
+                elif _is_trigger(msg, _ERR_TRIGGERS_ENOSPC):
+                    print("[WARN] ENOSPC en before_task. Rehaciendo loaders en modo seguro…")
+                    tr, va, te = _rebuild_loaders_safe(
+                        make_loader_fn, t, bs,
+                        encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed,
+                        dl_kwargs=dl_kwargs, verbose=verbose
+                    )
+                    tr = method_obj.prepare_train_loader(tr) if hasattr(method_obj, "prepare_train_loader") else tr
+                    method_obj.before_task(model, tr, va)
+                else:
+                    raise
 
+            # ---- Entrenamiento (con fallback por problemas de DataLoader) ----
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
             t0 = _time.time()
 
-            # Entrenamiento (con fallback por problemas de DataLoader)
             try:
                 history = train_supervised(
                     model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
                 )
             except Exception as e:
                 msg = f"{type(e).__name__}: {e}".lower()
-                triggers = ("bus error", "unexpected bus error", "shared memory", "shm", "dataloader worker", "worker exited", "multiprocessing")
-                if any(t in msg for t in triggers):
+                if _is_trigger(msg, _ERR_TRIGGERS_SHM):
                     print("[WARN] DataLoader/WSL issue detectado. Reintento con num_workers=0…")
                     tr_safe = _to_single_worker_loader(tr)
+                    try:
+                        history = train_supervised(
+                            model, tr_safe, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
+                        )
+                    except Exception as e2:
+                        msg2 = f"{type(e2).__name__}: {e2}".lower()
+                        if _is_trigger(msg2, _ERR_TRIGGERS_SHM) or _is_trigger(msg2, _ERR_TRIGGERS_ENOSPC):
+                            tr, va, te = _rebuild_loaders_safe(
+                                make_loader_fn, t, bs,
+                                encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed,
+                                dl_kwargs=dl_kwargs, verbose=verbose
+                            )
+                            history = train_supervised(
+                                model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
+                            )
+                        else:
+                            raise
+                elif _is_trigger(msg, _ERR_TRIGGERS_ENOSPC):
+                    print("[WARN] ENOSPC en entrenamiento. Rehaciendo loaders en modo seguro…")
+                    tr, va, te = _rebuild_loaders_safe(
+                        make_loader_fn, t, bs,
+                        encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed,
+                        dl_kwargs=dl_kwargs, verbose=verbose
+                    )
                     history = train_supervised(
-                        model, tr_safe, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
+                        model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
                     )
                 else:
                     raise
@@ -435,7 +538,7 @@ def run_continual(
                     "encoder": encoder,
                     "T": T,
                     "gain": gain,
-                    "batch_size": bs,
+                    "batch_size": bs,   # mantenemos B del preset
                     "epochs": epochs,
                     "lr": lr,
                     "amp": use_amp,
@@ -448,12 +551,12 @@ def run_continual(
 
             n_epochs_done = len((history or {}).get("val_loss", []))
 
-            # === EVAL: eval_loader devuelve (mse, mae) ===
-            te_mse, te_mae = eval_loader(te, model, loss_fn=loss_fn, device=device, use_amp=use_amp)
+            # === EVAL con fallback ===
+            te_mse, te_mae = _eval_with_fallback(te, model, loss_fn, device=device, use_amp=use_amp)
             results[name] = {"test_mse": te_mse, "test_mae": te_mae}
             seen.append((name, te))
             for pname, p_loader in seen[:-1]:
-                p_mse, p_mae = eval_loader(p_loader, model, loss_fn=loss_fn, device=device, use_amp=use_amp)
+                p_mse, p_mae = _eval_with_fallback(p_loader, model, loss_fn, device=device, use_amp=use_amp)
                 results[pname][f"after_{name}_mse"] = p_mse
                 results[pname][f"after_{name}_mae"] = p_mae
 
@@ -467,7 +570,10 @@ def run_continual(
             })
 
             if hasattr(method_obj, "after_task"):
-                method_obj.after_task(model, tr, va)
+                try:
+                    method_obj.after_task(model, tr, va)
+                except Exception:
+                    pass
 
             if used_rt:
                 try:
@@ -553,7 +659,7 @@ def run_continual(
         "method": method_obj.name,
         "encoder": encoder,
         "T": T,
-        "batch_size": bs,
+        "batch_size": bs,  # del preset
         "amp": use_amp,
         "seed": seed,
         "model": _model_label(model, tfm),
@@ -619,8 +725,18 @@ def run_continual(
         except Exception:
             pass
 
+    # Limpieza final del run
+    try:
+        del model, method_obj, loss_fn
+    except Exception:
+        pass
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     log_telemetry_event(out_dir, {"event": "run_end", "elapsed_sec": elapsed, "emissions_kg": emissions_kg})
     return out_dir, results
+
 
 # =========================================================
 # Reevaluación SOLO-EVAL
@@ -651,13 +767,13 @@ def reevaluate_only(
 
     # Preconstruir loaders de TEST por tarea
     dl_kwargs = dict(
-        num_workers         = int(data["num_workers"]),
-        pin_memory          = bool(data["pin_memory"]),
-        persistent_workers  = False,
-        prefetch_factor     = data["prefetch_factor"],
-        drop_last           = False,
-        pin_memory_device   = data.get("pin_memory_device", "cuda"),
-        timeout             = 0,
+        num_workers          = int(data["num_workers"]),
+        pin_memory           = bool(data["pin_memory"]),
+        persistent_workers   = False,
+        prefetch_factor      = data["prefetch_factor"],
+        drop_last            = False,
+        pin_memory_device    = data.get("pin_memory_device", "cuda"),
+        timeout              = 0,
     )
     tests: List[Tuple[str, Any]] = []
     for i, t in enumerate(task_list, start=1):
@@ -680,15 +796,15 @@ def reevaluate_only(
 
         model.eval()
         with torch.no_grad():
-            # Eval de la tarea j (diagonal)
+            # Eval de la tarea j (diagonal) — eval_loader → (mse, mae)
             tj_name, tj_loader = tests[j-1]
-            mse_j, mae_j = eval_loader(tj_loader, model, loss_fn=loss_fn, device=device, use_amp=(device.type=="cuda"))
+            mse_j, mae_j = _eval_with_fallback(tj_loader, model, loss_fn, device=device, use_amp=(device.type=="cuda"))
             mat[j-1][j-1] = float(mae_j) if mae_j is not None else math.nan
 
-            # Finalizar columna j evaluando i<=j
+            # Finalizar columna j evaluando i<=j (MAE)
             for i_idx in range(0, j):
                 ti_name, ti_loader = tests[i_idx]
-                mse_i, mae_i = eval_loader(ti_loader, model, loss_fn=loss_fn, device=device, use_amp=(device.type=="cuda"))
+                mse_i, mae_i = _eval_with_fallback(ti_loader, model, loss_fn, device=device, use_amp=(device.type=="cuda"))
                 mat[i_idx][j-1] = float(mae_i) if mae_i is not None else math.nan
 
     # Guardar eval_matrix y derivados

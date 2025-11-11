@@ -1,11 +1,16 @@
+# tools/sweep_methods.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import gc
+import time
+import traceback
+import multiprocessing as mp
 from pathlib import Path
-from copy import deepcopy
+from typing import Dict, Any, List
 
 # Asegura que 'src' esté en el sys.path ejecutando desde la raíz del repo
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,25 +33,21 @@ def _read_sweep(path: Path):
     # 1) Si ya es lista -> OK
     if isinstance(data, list):
         return data
-
     # 2) Si es dict, prueba claves comunes
     if isinstance(data, dict):
         for k in _POSSIBLE_KEYS:
             v = data.get(k, None)
             if isinstance(v, list):
                 return v
-
         # 3) Si hay exactamente una clave cuyo valor es lista -> úsala
         list_keys = [k for k, v in data.items() if isinstance(v, list)]
         if len(list_keys) == 1:
             return data[list_keys[0]]
-
         # 4) Si hay varias listas, elige la primera que parezca lista de runs
         for k in list_keys:
             v = data[k]
             if all(isinstance(x, (str, dict)) for x in v):
                 return v
-
         # 5) No se pudo inferir
         keys_preview = ", ".join(list(data.keys())[:8])
         raise TypeError(
@@ -61,12 +62,6 @@ def _norm_run(run_spec):
     Devuelve dict canónico con keys:
       method(str), params(dict), tag(str|None),
       preset(str|None), seed(int|None), amp(bool|None)
-
-    Admite:
-      - "ewc"
-      - {"method":"ewc", "params": {...}, "tag": "..."}
-      - {"method":"ewc", "method_kwargs": {...}, "tag": "..."}  # compat
-      - y overrides opcionales: "preset", "seed", "amp"
     """
     if isinstance(run_spec, str):
         return {
@@ -77,7 +72,6 @@ def _norm_run(run_spec):
             "seed": None,
             "amp": None,
         }
-
     if isinstance(run_spec, dict):
         # Nombre del método
         method = run_spec.get("method", run_spec.get("name", None))
@@ -109,7 +103,6 @@ def _norm_run(run_spec):
             "seed": seed,
             "amp": amp,
         }
-
     raise TypeError(f"Tipo de run no soportado: {type(run_spec)}")
 
 def _build_task_list_from_cfg(cfg):
@@ -119,12 +112,93 @@ def _build_task_list_from_cfg(cfg):
         runs = ["circuito1", "circuito2"]
     return [{"name": str(r)} for r in runs]
 
+# ------------------------ ejecución aislada por subproceso ------------------------
+def _child_run(run_norm: Dict[str, Any], eff_preset: str, out_root: str, safe_dl: int, conn):
+    """
+    Ejecuta un run en un subproceso y devuelve por pipe {"ok": bool, "run_dir": str} o {"ok": False, "error": str, "traceback": str}
+    """
+    try:
+        import torch
+
+        cfg = load_preset(eff_preset)
+
+        # Continual
+        cfg.setdefault("continual", {})
+        cfg["continual"]["method"] = run_norm["method"]
+        merged = dict(cfg["continual"].get("params", {}) or {})
+        merged.update(run_norm["params"] or {})
+        cfg["continual"]["params"] = merged
+
+        # Tag
+        if run_norm["tag"]:
+            cfg.setdefault("naming", {})
+            cfg["naming"]["tag"] = run_norm["tag"]
+
+        # Overrides seed/amp
+        if run_norm["seed"] is not None:
+            cfg.setdefault("data", {})
+            cfg["data"]["seed"] = int(run_norm["seed"])
+        if run_norm["amp"] is not None:
+            cfg.setdefault("optim", {})
+            cfg["optim"]["amp"] = bool(run_norm["amp"])
+
+        # Safe dataloader niveles (opcional)
+        # 0: no tocar; 1: desactiva persistent_workers; 2: además num_workers=0 y pin_memory=False
+        if safe_dl >= 1:
+            cfg.setdefault("data", {})
+            cfg["data"]["persistent_workers"] = False
+        if safe_dl >= 2:
+            cfg["data"]["num_workers"] = 0
+            cfg["data"]["pin_memory"] = False
+
+        # Componentes y tasks
+        make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
+        task_list = _build_task_list_from_cfg(cfg)
+
+        # Ejecuta
+        out_dir, _ = run_continual(
+            task_list=task_list,
+            make_loader_fn=make_loader_fn,
+            make_model_fn=make_model_fn,
+            tfm=tfm,
+            cfg=cfg,
+            preset_name=(cfg.get('_meta', {}).get('preset_key') or eff_preset),
+            out_root=out_root,
+            verbose=True,
+        )
+
+        # Limpieza explícita al finalizar el hijo
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        gc.collect()
+
+        conn.send({"ok": True, "run_dir": str(out_dir)})
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        conn.send({"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": tb})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 # ---------------------------------- CLI main ----------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", required=True, help="Nombre ('fast'/'std'/'accurate') o ruta a YAML.")
     ap.add_argument("--sweep-file", required=True, help="Ruta a JSON con runs.")
     ap.add_argument("--out", default="outputs", help="Carpeta de salida raíz.")
+    ap.add_argument("--isolate", default="on", choices=["on", "off"],
+                    help="Aísla cada run en un subproceso (recomendado para evitar fugas de shm/tmp).")
+    ap.add_argument("--safe-dataloader", type=int, default=0, choices=[0, 1, 2],
+                    help="Mitigaciones de DataLoader: 0=no tocar; 1=persistent_workers=False; 2=además workers=0 y pin_memory=False.")
+    ap.add_argument("--sleep", type=float, default=0.5, help="Pausa entre runs (seg).")
     args = ap.parse_args()
 
     # 1) Lee y normaliza runs
@@ -143,49 +217,84 @@ def main():
 
     # 2) Ejecuta
     for i, r in enumerate(runs, start=1):
-        # Carga preset efectivo del run (o el del CLI si no especifica)
         eff_preset = r["preset"] or args.preset
-        cfg = load_preset(eff_preset)
-
-        # Overrides de continual
-        cfg.setdefault("continual", {})
-        cfg["continual"]["method"] = r["method"]
-        merged = dict(cfg["continual"].get("params", {}) or {})
-        merged.update(r["params"] or {})
-        cfg["continual"]["params"] = merged
-
-        # Tag
-        if r["tag"]:
-            cfg.setdefault("naming", {})
-            cfg["naming"]["tag"] = r["tag"]
-
-        # Overrides de seed/amp si vienen en el run
-        if r["seed"] is not None:
-            cfg.setdefault("data", {})
-            cfg["data"]["seed"] = int(r["seed"])
-        if r["amp"] is not None:
-            cfg.setdefault("optim", {})
-            cfg["optim"]["amp"] = bool(r["amp"])
-
-        # Como el preset puede cambiar por run, construimos componentes por run
-        make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
-        task_list = _build_task_list_from_cfg(cfg)
-
         pretty = f"{r['method']} :: {r['tag']}" if r["tag"] else r["method"]
-        try:
-            print(f"\n=== [{i}/{len(runs)}] {r['method']} | tag={r['tag'] or 'exps'} | preset={eff_preset} ===\n")
-            run_continual(
-                task_list=task_list,
-                make_loader_fn=make_loader_fn,
-                make_model_fn=make_model_fn,
-                tfm=tfm,
-                cfg=cfg,
-                preset_name=(cfg.get('_meta', {}).get('preset_key') or eff_preset),
-                out_root=out_root,
-                verbose=True,
+        print(f"\n=== [{i}/{len(runs)}] {r['method']} | tag={r['tag'] or 'exps'} | preset={eff_preset} ===\n")
+
+        if args.isolate == "off":
+            # Modo “inline” (como tu script actual)
+            try:
+                cfg = load_preset(eff_preset)
+                cfg.setdefault("continual", {})
+                cfg["continual"]["method"] = r["method"]
+                merged = dict(cfg["continual"].get("params", {}) or {})
+                merged.update(r["params"] or {})
+                cfg["continual"]["params"] = merged
+                if r["tag"]:
+                    cfg.setdefault("naming", {})
+                    cfg["naming"]["tag"] = r["tag"]
+                if r["seed"] is not None:
+                    cfg.setdefault("data", {})
+                    cfg["data"]["seed"] = int(r["seed"])
+                if r["amp"] is not None:
+                    cfg.setdefault("optim", {})
+                    cfg["optim"]["amp"] = bool(r["amp"])
+
+                make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
+                task_list = _build_task_list_from_cfg(cfg)
+
+                run_continual(
+                    task_list=task_list,
+                    make_loader_fn=make_loader_fn,
+                    make_model_fn=make_model_fn,
+                    tfm=tfm,
+                    cfg=cfg,
+                    preset_name=(cfg.get('_meta', {}).get('preset_key') or eff_preset),
+                    out_root=out_root,
+                    verbose=True,
+                )
+            except Exception as e:
+                print(f"[ERROR] {type(e).__name__}: {e}")
+
+            # Limpieza “fuerte” entre runs (cuando no hay aislamiento)
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            gc.collect()
+
+        else:
+            # Modo aislado (recomendado)
+            p_conn, c_conn = mp.Pipe(duplex=False)
+            proc = mp.Process(
+                target=_child_run,
+                args=(r, eff_preset, str(out_root), int(args.safe_dataloader), c_conn),
+                daemon=False,
             )
-        except Exception as e:
-            print(f"[ERROR] {type(e).__name__}: {e}")
+            proc.start()
+            c_conn.close()
+
+            try:
+                msg = p_conn.recv()
+                if isinstance(msg, dict) and msg.get("ok"):
+                    print("[OK] run_dir:", msg.get("run_dir"))
+                else:
+                    err = (msg or {}).get("error", "Unknown error")
+                    print(f"[ERROR] {err}")
+                    tb = (msg or {}).get("traceback", "")
+                    if tb:
+                        print(tb)
+            except EOFError:
+                print("[ERROR] Proceso hijo terminó sin enviar resultado.")
+            finally:
+                proc.join()
+                p_conn.close()
+
+        time.sleep(float(args.sleep))
 
     return 0
 
