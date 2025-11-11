@@ -1,21 +1,71 @@
-{
-  "experiments": [
-    { "method": "naive", "params": {}, "tag": "stdt16_naive", "preset": "std_t16" },
-
-    { "method": "ewc", "params": { "lam": 1000000, "fisher_batches": 200 },
-      "tag": "stdt16_ewc_lam1e6_f200", "preset": "std_t16" },
-
-    { "method": "sca-snn",
-      "params": { "attach_to": "f6", "flatten_spatial": true,
-                  "num_bins": 30, "anchor_batches": 16, "bin_lo": -1.0, "bin_hi": 1.0,
-                  "max_per_bin": 1024, "beta": 0.40, "bias": 0.00,
-                  "soft_mask_temp": 0.60, "habit_decay": 0.99, "sim_min": 0.02 },
-      "tag": "stdt16_sca_bins30_b040_t060_ab16_flat1_sim002", "preset": "std_t16" },
-
-    { "method": "sa-snn",
-      "params": { "attach_to": "f6", "k": 8, "tau": 32, "vt_scale": 1.20, "p": 2000000,
-                  "th_min": 1.0, "th_max": 2.0, "flatten_spatial": false,
-                  "assume_binary_spikes": false, "reset_counters_each_task": true },
-      "tag": "stdt16_sa_k8_tau32_vt1p20_p2m_reset", "preset": "std_t16" }
-  ]
-}
+[
+  {
+    "method": "sca-snn",
+    "params": {
+      "attach_to": "f6",
+      "flatten_spatial": false,
+      "num_bins": 50,
+      "anchor_batches": 8,
+      "beta": 0.55,
+      "bias": 0.0,
+      "soft_mask_temp": 0.30,
+      "verbose": false,
+      "log_every": 65536
+    },
+    "tag": "std_sca_b50_b055_t030_ab8_f0"
+  },
+  {
+    "method": "sca-snn",
+    "params": {
+      "attach_to": "f6",
+      "flatten_spatial": false,
+      "num_bins": 50,
+      "anchor_batches": 16,
+      "beta": 0.50,
+      "bias": 0.0,
+      "soft_mask_temp": 0.50,
+      "verbose": false,
+      "log_every": 65536
+    },
+    "tag": "std_sca_b50_b050_t050_ab16_f0"
+  },
+  {
+    "method": "sa-snn",
+    "params": {
+      "attach_to": "f6",
+      "k": 8,
+      "tau": 32.0,
+      "th_min": 1.0,
+      "th_max": 2.0,
+      "p": 2000000,
+      "vt_scale": 1.20,
+      "flatten_spatial": false,
+      "assume_binary_spikes": false,
+      "reset_counters_each_task": false
+    },
+    "tag": "std_sa_k8_tau32_vt1p20_p2m_reset0"
+  },
+  {
+    "method": "sa-snn",
+    "params": {
+      "attach_to": "f6",
+      "k": 8,
+      "tau": 32.0,
+      "th_min": 1.0,
+      "th_max": 2.0,
+      "p": 2000000,
+      "vt_scale": 1.28,
+      "flatten_spatial": false,
+      "assume_binary_spikes": false,
+      "reset_counters_each_task": true
+    },
+    "tag": "std_sa_k8_tau32_vt1p28_p2m_reset1"
+  },
+  {
+    "method": "ewc",
+    "params": {
+      "lam": 1000000.0
+    },
+    "tag": "std_ewc_lam_1e6"
+  }
+]
