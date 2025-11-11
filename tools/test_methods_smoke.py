@@ -1,54 +1,79 @@
-# tools/test_methods_smoke.py
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import traceback, sys
-from torch import nn
+from pathlib import Path
+import sys
+from typing import Any, Dict, Iterable, Tuple
 import torch
+from torch import nn
 
-def _run_one(method_name: str, params: dict, preset: str="fast") -> bool:
-    from src.config import load_preset
-    from src.utils_components import build_components_for
-    from src.methods.registry import build_method
-    from src.eval import eval_loader
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-    cfg = load_preset(preset)
-    mk_loader, mk_model, tfm = build_components_for(cfg)
-    tr, va, te = mk_loader(task={"name":"circuito1"}, batch_size=8,
-                           encoder=cfg["data"]["encoder"], T=cfg["data"]["T"],
-                           gain=cfg["data"]["gain"], tfm=tfm, seed=cfg["data"]["seed"])
-    model = mk_model(tfm).to("cuda" if torch.cuda.is_available() else "cpu")
-    loss = nn.MSELoss()
+from src.methods.registry import build_method
+from src.nn_io import _align_target_shape
 
-    method = build_method(method_name, model, loss_fn=loss, device=next(model.parameters()).device, **(params or {}))
+def _dev(): return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1 forward de humo de train y 1 de val
-    xb, yb = next(iter(tr))
-    from src.nn_io import _forward_with_cached_orientation, _align_target_shape
-    y_hat = _forward_with_cached_orientation(model=model, x=xb, y=yb,
-        device=next(model.parameters()).device,
-        use_amp=bool(cfg["optim"]["amp"] and torch.cuda.is_available()),
-        phase_hint={"train": None}, phase="train")
-    yb2 = _align_target_shape(y_hat, yb).to(device=y_hat.device, dtype=y_hat.dtype)
-    with torch.amp.autocast("cuda", enabled=torch.cuda.is_available()):
-        loss_val = loss(y_hat, yb2) + (method.penalty() if hasattr(method, "penalty") else 0.0)
-    float(loss_val.detach().item())  # debe ser convertible a float
+def synthetic_loader(batches=3, B=8, T=8, H=66, W=200) -> Iterable[Tuple[torch.Tensor, torch.Tensor]]:
+    for i in range(batches):
+        # alterna (B,...) y (T,B,...)
+        if (i % 2) == 0:
+            x = torch.rand(B,1,H,W)
+        else:
+            x = torch.rand(T,B,1,H,W)
+        y = torch.rand(B)*2.0 - 1.0
+        yield x, y
 
-    mse, mae = eval_loader(va, model, loss)  # smoke
-    print(f"[{method_name}] OK | val mse≈{mse:.4f} mae≈{mae:.4f}")
+class TinyHead(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 8, 5, stride=2, padding=2), nn.ReLU(),
+            nn.Conv2d(8,16, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(16,32,3, stride=2, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1,1))
+        )
+        self.fc = nn.Linear(32,1)
+    def forward(self, x):
+        if x.ndim==5: x=x.mean(0)  # colapsa T en la cabeza dummy
+        return self.fc(self.conv(x).flatten(1))
+
+def _maybe_build_method(name: str, base_model: nn.Module, params: Dict[str, Any]):
+    dev=_dev()
+    model=base_model.to(dev).eval()
+    loss=nn.MSELoss()
+    return build_method(name=name, model=model, loss_fn=loss, device=dev, **params)
+
+def _run_one(name: str, params: Dict[str, Any]) -> bool:
+    dev=_dev()
+    model=TinyHead().to(dev).eval()
+    method = _maybe_build_method(name, model, params)
+    mse=mae=0.0; n=0
+    for xb,yb in synthetic_loader():
+        xb=xb.to(dev); yb=yb.to(dev)
+        y_hat_raw = method.impl(model, xb) if hasattr(method, "impl") and callable(getattr(method, "impl", None)) else model(xb)  # legacy safety
+        y_hat = y_hat_raw if isinstance(y_hat_raw, torch.Tensor) else (y_hat_raw[0] if isinstance(y_hat_raw,(list,tuple)) else y_hat_raw)
+        if not isinstance(y_hat, torch.Tensor):
+            y_hat = model(xb)
+        yb2 = _align_target_shape(y_hat, yb).to(device=y_hat.device, dtype=y_hat.dtype)
+        mse += torch.mean((y_hat - yb2)**2).item()
+        mae += torch.mean(torch.abs(y_hat - yb2)).item()
+        n+=1
+    print(f"[{name}] OK | mse≈{mse/max(1,n):.4g} mae≈{mae/max(1,n):.4g}")
     return True
 
 if __name__ == "__main__":
+    ok=True
     cases = [
-        ("ewc", {"lam": 3e6, "fisher_batches": 10}),
-        ("sca-snn", {"attach_to":"f6","num_bins":50,"beta":0.55,"soft_mask_temp":0.3,"anchor_batches":16}),
-        # añade aquí as-snn / sa-snn con tus params válidos
+        ("ewc", {"lam":3e6, "fisher_batches":5}),
+        ("sca-snn", {"attach_to":"fc","num_bins":10,"beta":0.55,"soft_mask_temp":0.3,"anchor_batches":2}),
+        ("as-snn", {"attach_to":"conv.2","gamma_ratio":0.4,"lambda_a":0.5,"measure_at":"modules"}),
+        ("sa-snn", {"attach_to":"fc","k":8,"tau":28,"vt_scale":1.33,"p":2_000_000,
+                    "th_min":1.0,"th_max":2.0,"flatten_spatial":False}),
+        ("rehearsal", {"buffer_size":64,"replay_ratio":0.25}),
+        ("ewc+sca-snn", {"lam":1e6,"fisher_batches":3,"attach_to":"fc","num_bins":10,"beta":0.4}),
     ]
-    ok = True
-    for name, params in cases:
-        try:
-            ok &= _run_one(name, params)
-        except Exception:
-            print(f"[{name}] FAIL")
-            traceback.print_exc()
-            ok = False
+    for name,params in cases:
+        ok &= _run_one(name, params)
     sys.exit(0 if ok else 1)

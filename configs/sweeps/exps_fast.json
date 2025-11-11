@@ -1,6 +1,93 @@
 {
-  "exps": [
-    { "method": "ewc", "params": { "lam": 3000000, "fisher_batches": 150 }, "tag": "fast_ewc_lam3e6_f150" },
-    { "method": "sca-snn", "params": { "attach_to": "f6", "flatten_spatial": false, "num_bins": 50, "anchor_batches": 16, "beta": 0.55, "bias": 0.00, "soft_mask_temp": 0.30, "verbose": false, "log_every": 65536 }, "tag": "fast_sca_bins50_b055_t030_ab16" }
+  "experiments": [
+    {
+      "tag": "smoke_naive",
+      "preset": "fast",
+      "seed": 42,
+      "amp": true,
+      "method": "naive",
+      "method_kwargs": {}
+    },
+    {
+      "tag": "smoke_ewc",
+      "preset": "fast",
+      "seed": 42,
+      "amp": true,
+      "method": "ewc",
+      "method_kwargs": {
+        "lam": 3e8,
+        "fisher_batches": 3
+      }
+    },
+    {
+      "tag": "smoke_sa_snn",
+      "preset": "fast",
+      "seed": 42,
+      "amp": true,
+      "method": "sa-snn",
+      "method_kwargs": {
+        "attach_to": "f6",
+        "k": 8,
+        "tau": 28,
+        "vt_scale": 1.33,
+        "p": 2000000,
+        "th_min": 1.0,
+        "th_max": 2.0,
+        "flatten_spatial": false,
+        "assume_binary_spikes": false,
+        "reset_counters_each_task": false,
+        "update_on_eval": false
+      }
+    },
+    {
+      "tag": "smoke_as_snn",
+      "preset": "fast",
+      "seed": 42,
+      "amp": true,
+      "method": "as-snn",
+      "method_kwargs": {
+        "attach_to": "f6",
+        "gamma_ratio": 0.4,
+        "lambda_a": 0.5,
+        "ema": 0.9,
+        "measure_at": "modules",
+        "penalty_mode": "l1",
+        "do_synaptic_scaling": false,
+        "activity_verbose": false,
+        "activity_every": 100
+      }
+    },
+    {
+      "tag": "smoke_sca_snn",
+      "preset": "fast",
+      "seed": 42,
+      "amp": true,
+      "method": "sca-snn",
+      "method_kwargs": {
+        "num_bins": 10,
+        "anchor_batches": 2,
+        "bin_lo": -1.0,
+        "bin_hi": 1.0,
+        "max_per_bin": 512,
+        "beta": 0.55,
+        "bias": 0.0,
+        "habit_decay": 0.99,
+        "soft_mask_temp": 0.3,
+        "flatten_spatial": false,
+        "verbose": false,
+        "log_every": 400
+      }
+    },
+    {
+      "tag": "smoke_rehearsal",
+      "preset": "fast",
+      "seed": 42,
+      "amp": true,
+      "method": "rehearsal",
+      "method_kwargs": {
+        "buffer_size": 512,
+        "replay_ratio": 0.25
+      }
+    }
   ]
 }

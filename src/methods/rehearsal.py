@@ -1,20 +1,17 @@
 # src/methods/rehearsal.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Iterator
 import random
-
 import torch
 from torch.utils.data import DataLoader, Dataset, TensorDataset
-
 from .api import ContinualMethod
-
 
 @dataclass
 class RehearsalConfig:
     buffer_size: int = 10_000
-    replay_ratio: float = 0.2  # fracción del batch dedicada a replay en cada iteración
-
+    replay_ratio: float = 0.2  # fracción del batch dedicada a replay
 
 class ReservoirBuffer:
     """Reservoir sampling en CPU: guarda (x,y) como tensores."""
@@ -25,7 +22,6 @@ class ReservoirBuffer:
 
     def add_sample(self, sample: Tuple[torch.Tensor, torch.Tensor]) -> None:
         x, y = sample
-        # guardamos siempre en CPU para no ocupar VRAM; clonado para evitar referencias
         x = x.detach().cpu().clone()
         y = y.detach().cpu().clone()
         self.num_seen += 1
@@ -37,7 +33,6 @@ class ReservoirBuffer:
                 self.reservoir[j] = (x, y)
 
     def add_from_loader(self, loader: DataLoader, cap: Optional[int] = None) -> int:
-        """Añade muestras individuales desde un loader (máximo 'cap' muestras si se desea)."""
         added = 0
         for xb, yb in loader:
             B = xb.shape[0]
@@ -52,23 +47,21 @@ class ReservoirBuffer:
         if not self.reservoir:
             raise RuntimeError("Reservoir vacío")
         xs, ys = zip(*self.reservoir)
-        X = torch.stack(xs, dim=0)  # se apila (mantiene 4D o 5D por muestra)
+        X = torch.stack(xs, dim=0)
         Y = torch.stack(ys, dim=0)
         return TensorDataset(X, Y)
 
     def __len__(self) -> int:
         return len(self.reservoir)
 
-
 class _ReplayMixLoader:
-    """Iterador que mezcla batchs de tarea y replay, sin mover a device (lo hace training)."""
+    """Iterador que mezcla batches de tarea y replay; mover a device lo hace el training."""
     def __init__(self, task_loader: DataLoader, replay_loader: DataLoader,
                  task_bs: int, replay_bs: int):
         self.task_loader = task_loader
         self.replay_loader = replay_loader
         self.task_bs = task_bs
         self.replay_bs = replay_bs
-
         self._task_it: Optional[Iterator] = None
         self._rep_it: Optional[Iterator] = None
 
@@ -89,8 +82,6 @@ class _ReplayMixLoader:
         except StopIteration:
             self._rep_it = iter(self.replay_loader)
             x_r, y_r = next(self._rep_it)
-
-        # Concatenación por batch (dim=0). Formas compatibles: (B, T, C, H, W) o (B, C, H, W)
         x = torch.cat([x_t, x_r], dim=0)
         y = torch.cat([y_t, y_r], dim=0)
         return x, y
@@ -105,29 +96,26 @@ class RehearsalMethod:
         self.buffer = ReservoirBuffer(cfg.buffer_size)
         self._last_task_loader: Optional[DataLoader] = None
 
-        # nombre autoexplicativo p/outputs
         rr = int(round(cfg.replay_ratio * 100))
         self.name = f"rehearsal_buf_{cfg.buffer_size}_rr_{rr}"
 
-        # ---- Flags de logging inyectables desde el preset (runner hace setattr) ----
-        self.buffer_verbose: bool = False      # resumen al cerrar cada tarea
-        self.replay_verbose: bool = False      # info al construir el loader mixto
-        self.replay_show_shapes: bool = False  # imprimir shapes estimadas
+        # Flags de logging inyectables
+        self.buffer_verbose: bool = False
+        self.replay_verbose: bool = False
+        self.replay_show_shapes: bool = False
 
     # --- API ContinualMethod ---
     def penalty(self) -> torch.Tensor:
-        # No añade regularización de pérdida
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         return torch.zeros((), dtype=torch.float32, device=dev)
 
     def before_task(self, model, train_loader: DataLoader, val_loader: DataLoader) -> None:
-        # Conserva el loader puro para alimentar el buffer en after_task
         self._last_task_loader = train_loader
 
     def after_task(self, model, train_loader: DataLoader, val_loader: DataLoader) -> None:
         if self._last_task_loader is not None:
             before = len(self.buffer)
-            added = self.buffer.add_from_loader(self._last_task_loader)  # ← ahora es int
+            added = self.buffer.add_from_loader(self._last_task_loader)  # ahora int
             now = len(self.buffer)
             self._last_task_loader = None
             if getattr(self, "buffer_verbose", False):
@@ -173,7 +161,5 @@ class RehearsalMethod:
         )
         return _ReplayMixLoader(train_loader, replay_loader, task_bs, rep_bs)
 
-    # liberar memoria si runner llama .detach()
     def detach(self) -> None:
-        # Si quieres conservar el buffer entre tareas/experimentos, comenta la línea de abajo.
         self.buffer.reservoir.clear()

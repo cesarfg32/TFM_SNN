@@ -1,143 +1,172 @@
 # src/nn_io.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple, Union, Iterable
+
 import torch
 from torch import nn
-from torch.amp import autocast
 
-# --------------------------------------------------------------------------------------
-# Runtime encode (para inputs 4D -> 5D) + helpers de forward y alineado de targets
-# --------------------------------------------------------------------------------------
+__all__ = [
+    "set_encode_runtime",
+    "get_encode_runtime",
+    "_forward_with_cached_orientation",
+    "_align_target_shape",
+]
 
-_RUNTIME_ENC: Dict[str, object] = {
-    "mode": None,   # "rate" | "latency" | "raw" | None
-    "T": None,
-    "gain": None,
-    "device": torch.device("cpu"),
-}
+# ============================================================
+#  Estado global mínimo para compatibilidad
+# ============================================================
+_ENCODE_RUNTIME: bool = False  # toggled por training/runner según preset
 
-def set_encode_runtime(mode: Optional[str], T: Optional[int] = None, gain: Optional[float] = None,
-                       device: Optional[torch.device] = None) -> None:
-    """Activa/desactiva codificación temporal en runtime para inputs 4D (B,C,H,W)."""
-    if mode is None:
-        _RUNTIME_ENC.update({"mode": None, "T": None, "gain": None, "device": torch.device("cpu")})
-        return
-    _RUNTIME_ENC.update({
-        "mode": str(mode),
-        "T": int(T) if T is not None else None,
-        "gain": float(gain) if gain is not None else None,
-        "device": device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")),
-    })
 
-@torch.no_grad()
-def _maybe_runtime_encode(x4: torch.Tensor) -> Optional[torch.Tensor]:
-    """Si activo y x es 4D (B,C,H,W), devuelve 5D (T,B,C,H,W); si no, None."""
-    enc = _RUNTIME_ENC
-    mode, T, gain = enc.get("mode"), enc.get("T"), enc.get("gain")
-    if mode is None or T is None or x4.ndim != 4:
+def set_encode_runtime(enabled: bool) -> None:
+    """
+    Activa/desactiva el modo de codificación en runtime (shim para compatibilidad).
+    """
+    global _ENCODE_RUNTIME
+    _ENCODE_RUNTIME = bool(enabled)
+
+
+def get_encode_runtime() -> bool:
+    """Devuelve el flag global de encode_runtime."""
+    return _ENCODE_RUNTIME
+
+
+# ============================================================
+#  Utilidades internas
+# ============================================================
+def _to_device(obj: Any, device: torch.device, non_blocking: bool = True) -> Any:
+    """
+    Mueve tensores (o estructuras anidadas de tensores) a 'device'.
+    Deja intactos los tipos no-tensor.
+    """
+    if torch.is_tensor(obj):
+        return obj.to(device=device, non_blocking=non_blocking)
+    if isinstance(obj, (list, tuple)):
+        typ = type(obj)
+        return typ(_to_device(x, device, non_blocking) for x in obj)
+    if isinstance(obj, dict):
+        return {k: _to_device(v, device, non_blocking) for k, v in obj.items()}
+    return obj
+
+
+def _first_tensor(x: Any) -> Optional[torch.Tensor]:
+    """
+    Extrae el primer Tensor encontrado de x (Tensor|tuple|list|dict), o None si no hay.
+    """
+    if torch.is_tensor(x):
+        return x
+    if isinstance(x, dict):
+        # heurística: prueba keys más comunes, si no, el primer tensor en values
+        for key in ("logits", "pred", "y_hat", "output", "out"):
+            if key in x and torch.is_tensor(x[key]):
+                return x[key]
+        for v in x.values():
+            if torch.is_tensor(v):
+                return v
+            t = _first_tensor(v)
+            if t is not None:
+                return t
         return None
-
-    dev = x4.device
-    # Normaliza a [0,1]
-    if x4.dtype == torch.uint8:
-        x = x4.to(device=dev, dtype=torch.float32) / 255.0
-    else:
-        x = x4.to(device=dev, dtype=torch.float32)
-        if x.max().item() > 1.5:
-            x = (x / 255.0).clamp_(0.0, 1.0)
-        else:
-            x = x.clamp_(0.0, 1.0)
-
-    if mode == "raw":
-        return x.unsqueeze(0).repeat(T, 1, 1, 1, 1).contiguous()
-    if mode == "rate":
-        p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
-        r = torch.rand((T, *x.shape), device=dev)
-        return (r < p.unsqueeze(0)).to(torch.float32).contiguous()
-    if mode == "latency":
-        p = (x * float(gain if gain is not None else 1.0)).clamp_(0.0, 1.0)
-        t_fire = torch.round((1.0 - p) * float(max(T - 1, 0))).to(torch.long)  # (B,C,H,W)
-        N = t_fire.numel()
-        spikes = torch.zeros((T, N), device=dev, dtype=torch.float32)
-        idx = torch.arange(N, device=dev, dtype=torch.long)
-        spikes[t_fire.view(-1), idx] = 1.0
-        return spikes.view(T, *x.shape).contiguous()
+    if isinstance(x, (tuple, list)):
+        for v in x:
+            if torch.is_tensor(v):
+                return v
+            t = _first_tensor(v)
+            if t is not None:
+                return t
+        return None
     return None
 
-def _align_target_shape(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Alinea y con y_hat: (B,)↔(B,1)."""
-    if y_hat.ndim == 2 and y_hat.shape[1] == 1 and y.ndim == 1:
-        return y.unsqueeze(1)
-    if y_hat.ndim == 1 and y.ndim == 2 and y.shape[1] == 1:
-        return y.squeeze(1)
-    return y
 
-# --------------------------------------------------------------------------------------
-# AMP-safe forward: intenta autocast y si hay mismatch Half/Float en bias, reintenta FP32
-# --------------------------------------------------------------------------------------
-
-_WARNED_FALLBACK: Dict[str, bool] = {}  # por fase (train/val/fisher) para no spamear
-
-def _forward_amp_safe(model: nn.Module, x_fwd: torch.Tensor, use_amp: bool, phase: str) -> torch.Tensor:
-    """
-    Intenta forward con AMP. Si PyTorch lanza el clásico error de:
-      "Input type (c10::Half) and bias type (float) should be the same"
-    reintentamos el forward en FP32 SOLO para este paso/batch y avisamos una vez por fase.
-    """
-    try:
-        with autocast("cuda", enabled=use_amp):
-            return model(x_fwd)
-    except RuntimeError as e:
-        msg = str(e)
-        # Detecta patrón típico de mismatch de dtype en bias
-        if ("bias type" in msg or "should be the same" in msg) and ("Half" in msg or "c10::Half" in msg):
-            if not _WARNED_FALLBACK.get(phase, False):
-                print(f"[AMP-FALLBACK:{phase}] Detectado mismatch de dtype (Half vs Float en bias). Reintentando en FP32 SOLO para este forward.")
-                _WARNED_FALLBACK[phase] = True
-            with autocast("cuda", enabled=False):
-                return model(x_fwd)
-        raise  # Si es otro error, lo propagamos
-
+# ============================================================
+#  Forward "seguro" con AMP + extracción de tensor
+# ============================================================
 def _forward_with_cached_orientation(
-    model: nn.Module, x: torch.Tensor, y: torch.Tensor, device: torch.device,
-    use_amp: bool, phase_hint: Dict[str, str], phase: str,
+    model: nn.Module,
+    x: Any,
+    y: Optional[torch.Tensor] = None,
+    *,
+    device: Union[torch.device, str, None] = None,
+    use_amp: bool = False,
+    phase_hint: Optional[Dict[str, Any]] = None,
+    phase: Optional[str] = None,
 ) -> torch.Tensor:
-    """Forward robusto para 4D/5D, con autocorrección de orientación y runtime-encode opcional."""
-    # mover a device
-    x = x.to(device, non_blocking=True)
-    y = y.to(device, non_blocking=True)
+    """
+    Ejecuta el forward del modelo moviendo x al device, con autocast opcional,
+    y devuelve SIEMPRE un Tensor (primer tensor de la salida), apto para losses.
 
-    # 4D -> 5D (runtime)
-    if x.ndim == 4 and _RUNTIME_ENC.get("mode") is not None:
-        x_rt = _maybe_runtime_encode(x)
-        if x_rt is not None:
-            x = x_rt  # (T,B,C,H,W)
+    - Acepta salidas del modelo como Tensor | tuple | list | dict.
+    - No asume orientación temporal concreta; no reordena ejes (la data/preset ya lo fija).
+    - 'phase_hint' y 'phase' se aceptan por compatibilidad; no se usan aquí.
 
-    # no secuencial
-    if x.ndim != 5:
-        return _forward_amp_safe(model, x, use_amp=use_amp, phase=phase)
+    Returns:
+        torch.Tensor: primer tensor extraído de la salida del modelo.
+    """
+    # Normaliza device
+    if device is None:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
+    device = torch.device(device)
 
-    B = int(y.shape[0])
-    hint = phase_hint.get(phase)
-    if hint is None:
-        hint = "ok" if x.shape[1] == B else ("permute" if x.shape[0] == B else "ok")
-        phase_hint[phase] = hint
+    # Mueve x a device (respetando estructuras)
+    x_dev = _to_device(x, device)
 
-    x_fwd = x if hint == "ok" else x.permute(1, 0, 2, 3, 4).contiguous()
-    y_hat = _forward_amp_safe(model, x_fwd, use_amp=use_amp, phase=phase)
+    # AMP según device
+    dev_type = "cuda" if device.type == "cuda" else "cpu"
+    amp_enabled = bool(use_amp and device.type == "cuda")
 
-    # autocorrección si hace falta
-    if isinstance(y_hat, torch.Tensor) and y_hat.ndim >= 1 and y_hat.shape[0] != B:
-        if hint == "ok":
-            x_alt = x.permute(1, 0, 2, 3, 4).contiguous()
-            y_try = _forward_amp_safe(model, x_alt, use_amp=use_amp, phase=phase)
-            if isinstance(y_try, torch.Tensor) and y_try.ndim >= 1 and y_try.shape[0] == B:
-                phase_hint[phase] = "permute"
-                y_hat = _forward_amp_safe(model, x_alt, use_amp=use_amp, phase=phase)
+    model_was_training = model.training
+    # No tocamos el modo: que decida el caller (EWC ya pone eval en estimate_fisher)
+
+    with torch.amp.autocast(device_type=dev_type, enabled=amp_enabled):
+        out = model(x_dev)
+
+    y_hat = _first_tensor(out)
+    if y_hat is None:
+        # Último intento: si 'out' es directamente un número/array convertible:
+        if torch.is_tensor(out):
+            y_hat = out
         else:
-            y_try = _forward_amp_safe(model, x, use_amp=use_amp, phase=phase)
-            if isinstance(y_try, torch.Tensor) and y_try.ndim >= 1 and y_try.shape[0] == B:
-                phase_hint[phase] = "ok"
-                y_hat = _forward_amp_safe(model, x, use_amp=use_amp, phase=phase)
+            raise RuntimeError(
+                "[nn_io] El modelo no devolvió ningún tensor reconocible. "
+                f"Tipo de salida: {type(out).__name__}"
+            )
     return y_hat
+
+
+# ============================================================
+#  Alineación de targets a la forma de y_hat
+# ============================================================
+def _align_target_shape(y_hat: Any, y: torch.Tensor) -> torch.Tensor:
+    """
+    Alinea 'y' con la forma de 'y_hat' en casos comunes de regresión de 1D:
+    - (B,)  <->  (B,1)
+
+    También tolera que y_hat sea dict/tuple/list; en ese caso se extrae el primer tensor
+    para chequear su forma. Si no se puede extraer, devuelve 'y' tal cual.
+
+    Casos soportados:
+      * y_hat=(B,1), y=(B,)  --> y.unsqueeze(1)
+      * y_hat=(B,),  y=(B,1) --> y.squeeze(1)
+      * otros                --> y
+    """
+    ref = _first_tensor(y_hat) if not torch.is_tensor(y_hat) else y_hat
+    if ref is None or not torch.is_tensor(y):
+        return y
+
+    # Limpieza de NaNs/Inf por robustez (no cambia la forma)
+    if y.dtype.is_floating_point:
+        y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+
+    try:
+        if ref.ndim == 2 and ref.shape[1] == 1 and y.ndim == 1:
+            return y.unsqueeze(1)
+        if ref.ndim == 1 and y.ndim == 2 and y.shape[1] == 1:
+            return y.squeeze(1)
+    except Exception:
+        # En caso de algo raro, devolvemos y sin tocar
+        return y
+    return y

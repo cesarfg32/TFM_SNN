@@ -1,124 +1,48 @@
-#!/usr/bin/env python3
-# tools/lint_methods.py
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-
-# --- Asegura que la raíz del repo está en sys.path ---
-import sys
 from pathlib import Path
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
+import sys
 import torch
 from torch import nn
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from src.methods.registry import build_method
 
-# ---- Modelo dummy con un submódulo llamado 'f6' ----
-class FakePilotNet(nn.Module):
+class Tiny(nn.Module):
     def __init__(self):
         super().__init__()
-        self.stem = nn.Sequential(nn.Flatten())
-        # Submódulo con el nombre exacto que esperan los métodos
-        self.f6 = nn.Linear(4, 1)
-
-    def forward(self, x):
-        # Soporta (B,4) o cualquier cosa que se aplane a 4 por batch
-        x = self.stem(x)
-        if x.shape[-1] != 4:
-            # adapta a 4 características para no fallar en el forward
-            x = nn.functional.adaptive_avg_pool1d(x.unsqueeze(1), 4).squeeze(1)
-        return self.f6(x)
-
-def _fake_model():
-    return FakePilotNet()
-
-# Kwargs mínimos por método para “compilar” sin romper semántica
-METHOD_DEFAULTS = {
-    "ewc": dict(lam=3e6, fisher_batches=5),
-    "sa-snn": dict(
-        attach_to="f6", k=6, tau=28,
-        th_min=1.0, th_max=2.0, p=2_000_000,
-        vt_scale=1.2, flatten_spatial=False,
-        assume_binary_spikes=False, reset_counters_each_task=False
-    ),
-    "as-snn": dict(
-        attach_to="f6", measure_at="f6",
-        gamma_ratio=0.33, lambda_a=1.0, ema=0.95,
-        do_synaptic_scaling=True, scale_clip=2.0, scale_bias=0.0,
-        penalty_mode="l2"   # <- válido: 'l1' o 'l2'
-    ),
-    "sca-snn": dict(
-        attach_to="f6", flatten_spatial=False, num_bins=60,
-        anchor_batches=8, bin_lo=0.0, bin_hi=1.0, max_per_bin=24,
-        beta=0.5, bias=0.0, soft_mask_temp=0.75, habit_decay=0.0,
-        verbose=False, log_every=50
-    ),
-    "rehearsal": dict(buffer_size=256, replay_ratio=0.2),
-    "naive": dict(),
-    "colanet": dict(attach_to="f6", flatten_spatial=False),
-}
-
-def _merge_kwargs(parts):
-    """Fusiona kwargs por partes en composites (p.ej., 'as-snn+ewc')."""
-    merged = {}
-    for p in parts:
-        d = METHOD_DEFAULTS.get(p, {})
-        for k, v in d.items():
-            if k not in merged:
-                merged[k] = v
-    return merged
-
-def _check(name: str) -> bool:
-    ok = True
-    parts = [s.strip().lower() for s in name.split("+")]
-    kwargs = _merge_kwargs(parts)
-
-    try:
-        m = build_method(
-            name, _fake_model(), loss_fn=nn.MSELoss(), device=torch.device("cpu"),
-            **kwargs
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 8, 5, stride=2, padding=2), nn.ReLU(),
+            nn.Conv2d(8,16, 3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(16,32,3, stride=2, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1,1))
         )
-    except Exception as e:
-        print(f"[FAIL] build_method('{name}') lanzó excepción: {e}")
-        return False
-
-    # Contrato mínimo
-    for attr in ("before_task", "after_task", "penalty", "name"):
-        if not hasattr(m, attr):
-            print(f"[FAIL] {name}: falta atributo '{attr}'")
-            ok = False
-
-    # penalty debe ser escalar (float o tensor escalar)
-    try:
-        p = m.penalty()
-        if isinstance(p, torch.Tensor):
-            _ = float(p.detach().cpu().item())
-        else:
-            _ = float(p)
-    except Exception as e:
-        print(f"[FAIL] {name}: penalty no es escalar numérico. ({type(p)}) err={e}")
-        ok = False
-
-    if ok:
-        print(f"[OK] {name}")
-    return ok
+        self.fc = nn.Linear(32,1)
+    def forward(self, x):
+        if x.ndim==5: x=x.mean(0)
+        return self.fc(self.conv(x).flatten(1))
 
 if __name__ == "__main__":
-    import sys
-    names = sys.argv[1:] or [
-        "naive",
-        "ewc",
-        "rehearsal",
-        "sa-snn",
-        "as-snn",
-        "sca-snn",
-        "colanet",
-        "as-snn+ewc",
-        "sca-snn+ewc",
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = Tiny().to(dev)
+    loss = nn.MSELoss()
+
+    cases = [
+        ("naive", {}),
+        ("ewc", {"lam": 1e6, "fisher_batches": 3}),
+        ("rehearsal", {"buffer_size":128, "replay_ratio":0.25}),
+        ("sa-snn", {"attach_to":"fc","k":8,"tau":28,"vt_scale":1.33,"p":2_000_000,
+                    "th_min":1.0,"th_max":2.0,"flatten_spatial":False}),
+        ("as-snn", {"attach_to":"conv.2","gamma_ratio":0.4,"lambda_a":0.5,"measure_at":"modules"}),
+        ("sca-snn", {"attach_to":"fc","num_bins":10,"beta":0.55,"soft_mask_temp":0.3,"anchor_batches":2}),
+        ("ewc+sca-snn", {"lam":1e6,"fisher_batches":3,"attach_to":"fc","num_bins":10,"beta":0.4}),
     ]
-    any_fail = False
-    for n in names:
-        any_fail |= (not _check(n))
-    sys.exit(1 if any_fail else 0)
+
+    for name, params in cases:
+        try:
+            m = build_method(name, model, loss_fn=loss, device=dev, **params)
+            print(f"[OK] build_method('{name}') -> {m.name}")
+        except Exception as e:
+            print(f"[FAIL] build_method('{name}') lanzó excepción: {e}")

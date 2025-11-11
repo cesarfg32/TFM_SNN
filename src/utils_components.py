@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Tuple
 
 from src.utils import build_make_loader_fn  # tu util original
+from src.models import build_model  # <-- usa tu propio factory
 
 @dataclass
 class _TFMShim:
@@ -58,32 +59,34 @@ def _pick_loader_root(cfg) -> Path:
     # si no existe, devolvemos r igualmente para no romper la llamada
     return r
 
-def _make_model_factory(model_cfg: dict) -> Callable[[Any], Any]:
-    """
-    Devuelve make_model_fn(tfm)->model. Instancia el modelo indicado en cfg['model']['name']
-    probando nombre literal y fallback snake_case -> CamelCase.
-    """
-    name = str(model_cfg.get("name", "PilotNetSNN"))
-    mod = import_module("src.models")
-    cls = getattr(mod, name, None)
-    if cls is None:
-        alt = _snake_to_camel(name)
-        cls = getattr(mod, alt, None)
-    if cls is None:
-        raise AttributeError(f"src.models no tiene '{name}' ni '{_snake_to_camel(name)}'")
+def _normalize_model_name(raw: str) -> str:
+    # Acepta CamelCase, guiones y nombres sin guiones bajos:
+    s = raw.strip()
+    # alias CamelCase frecuentes
+    if s == "PilotNetSNN":
+        return "pilotnet_snn"
+    if s == "PilotNetANN":
+        return "pilotnet_ann"
 
-    def make_model_fn(tfm: _TFMShim):
-        ch = 1 if getattr(tfm, "to_gray", True) else 3
-        for attempt in (
-            lambda: cls(in_channels=ch, img_h=tfm.h, img_w=tfm.w),
-            lambda: cls(in_channels=ch),
-            lambda: cls(),
-        ):
-            try:
-                return attempt()
-            except Exception:
-                continue
-        return cls(in_channels=ch)
+    s = s.lower().replace("-", "_")
+    s_no = s.replace("_", "")
+
+    # alias sin guión bajo
+    if s_no == "pilotnetsnn":
+        return "pilotnet_snn"
+    if s_no == "pilotnetann":
+        return "pilotnet_ann"
+    if s_no == "snnvision":
+        return "snn_vision"
+
+    return s  # deja lo que venga si ya es canónico
+
+def _make_model_factory(model_cfg: dict):
+    raw = str(model_cfg.get("name", "pilotnet_snn"))
+    name = _normalize_model_name(raw)
+
+    def make_model_fn(tfm):
+        return build_model(name, tfm)
 
     return make_model_fn
 

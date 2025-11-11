@@ -7,15 +7,7 @@ import torch
 from torch import nn
 from torch.amp import autocast
 
-from .nn_io import _forward_with_cached_orientation
-
-def _align_target_shape(y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    """Alinea la forma del target con la predicción (B,)↔(B,1)."""
-    if y_hat.ndim == 2 and y_hat.shape[1] == 1 and y.ndim == 1:
-        return y.unsqueeze(1)
-    if y_hat.ndim == 1 and y.ndim == 2 and y.shape[1] == 1:
-        return y.squeeze(1)
-    return y
+from .nn_io import _forward_with_cached_orientation, _align_target_shape
 
 @torch.no_grad()
 def eval_loader(
@@ -49,7 +41,7 @@ def eval_loader(
     v_running_mse = 0.0
     v_running_mae = 0.0
     n_val_batches = 0
-    phase_hint: Dict[str, str] = {"val": None}
+    phase_hint: Dict[str, Optional[str]] = {"val": None}
 
     for x, y in loader:
         y = y.to(device, non_blocking=True)
