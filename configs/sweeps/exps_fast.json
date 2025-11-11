@@ -14,10 +14,7 @@
       "seed": 42,
       "amp": true,
       "method": "ewc",
-      "method_kwargs": {
-        "lam": 3e8,
-        "fisher_batches": 3
-      }
+      "method_kwargs": { "lam": 1e9, "fisher_batches": 3 }
     },
     {
       "tag": "smoke_sa_snn",
@@ -26,11 +23,9 @@
       "amp": true,
       "method": "sa-snn",
       "method_kwargs": {
-        "attach_to": "f6",
         "k": 8,
-        "tau": 28,
+        "tau": 32,
         "vt_scale": 1.33,
-        "p": 2000000,
         "th_min": 1.0,
         "th_max": 2.0,
         "flatten_spatial": false,
@@ -47,14 +42,14 @@
       "method": "as-snn",
       "method_kwargs": {
         "attach_to": "f6",
-        "gamma_ratio": 0.4,
-        "lambda_a": 0.5,
+        "gamma_ratio": 0.5,
+        "lambda_a": 2.5,
         "ema": 0.9,
         "measure_at": "modules",
         "penalty_mode": "l1",
         "do_synaptic_scaling": false,
         "activity_verbose": false,
-        "activity_every": 100
+        "activity_every": 200
       }
     },
     {
@@ -68,11 +63,11 @@
         "anchor_batches": 2,
         "bin_lo": -1.0,
         "bin_hi": 1.0,
-        "max_per_bin": 512,
+        "max_per_bin": 256,
         "beta": 0.55,
         "bias": 0.0,
-        "habit_decay": 0.99,
         "soft_mask_temp": 0.3,
+        "habit_decay": 0.99,
         "flatten_spatial": false,
         "verbose": false,
         "log_every": 400
@@ -85,8 +80,11 @@
       "amp": true,
       "method": "rehearsal",
       "method_kwargs": {
-        "buffer_size": 512,
-        "replay_ratio": 0.25
+        "buffer_size": 3000,
+        "replay_ratio": 0.15,
+        "replay_num_workers": 0,
+        "replay_pin_memory": false,
+        "replay_persistent_workers": false
       }
     }
   ]

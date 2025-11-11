@@ -7,16 +7,16 @@ import torch
 
 from .base import BaseMethod
 from .adapters import MethodAdapter
-from .naive import Naive                  # asumes que ya lo tienes
+from .naive import Naive
 from .ewc import EWCMethod
 from .rehearsal import RehearsalMethod, RehearsalConfig
 from .composite import CompositeMethod
 
-# SNN methods
+# SNN methods (implementación existente)
 from .sa_snn import SASNN, SASNNConfig
 from .as_snn import AS_SNN
 from .sca_snn import SCA_SNN
-from .colanet import CoLaNET            # asumes que ya lo tienes
+from .colanet import CoLaNET
 
 # --------------------------------------------------------------------------------------
 # Filtros de kwargs por método (evita pasar lam/fisher a SA/AS/SCA, etc.)
@@ -26,23 +26,29 @@ EWC_KEYS = {"lam", "ewc_lam", "fisher_batches"}
 ALLOWED_KEYS: Dict[str, set[str]] = {
     "sa-snn": {
         "attach_to", "k", "tau", "th_min", "th_max", "p", "vt_scale",
-        "flatten_spatial", "assume_binary_spikes", "reset_counters_each_task", "update_on_eval"
+        "flatten_spatial", "assume_binary_spikes", "reset_counters_each_task",
+        "update_on_eval"
     },
     "as-snn": {
         "measure_at", "attach_to", "gamma_ratio", "lambda_a", "ema",
         "do_synaptic_scaling", "scale_clip", "scale_bias", "penalty_mode",
+        # añadidos opcionales:
         "activity_verbose", "activity_every", "eps", "name_suffix",
     },
     "sca-snn": {
         "attach_to", "flatten_spatial", "num_bins", "anchor_batches",
         "bin_lo", "bin_hi", "max_per_bin", "beta", "bias",
-        "soft_mask_temp", "habit_decay", "verbose", "log_every", "T"
+        "soft_mask_temp", "habit_decay", "verbose", "log_every"
     },
-    "rehearsal": {"buffer_size", "replay_ratio"},
+    "rehearsal": {
+        "buffer_size", "replay_ratio",
+        # NUEVOS: sólo afectan al replay loader
+        "replay_num_workers", "replay_pin_memory", "replay_persistent_workers",
+        "replay_drop_last", "replay_shuffle",
+    },
     "naive": set(),
     "colanet": {"attach_to", "flatten_spatial"},
 }
-
 GENERIC_TO_DROP = {
     "T", "epochs", "batch_size", "lr", "es_patience", "es_min_delta",
     "compile", "compile_mode", "amp", "encoder", "gain"
@@ -60,6 +66,11 @@ def _ewc_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 def _wrap(obj: BaseMethod | Any, *, loss_fn=None, device=None, name_hint: Optional[str] = None) -> BaseMethod:
+    """
+    Devuelve un BaseMethod:
+    - Si ya es BaseMethod, lo retorna tal cual.
+    - Si no, lo envuelve con MethodAdapter (delegación).
+    """
     if isinstance(obj, BaseMethod):
         return obj
     return MethodAdapter(obj, name=name_hint, device=device, loss_fn=loss_fn)
@@ -75,6 +86,13 @@ def build_method(
     device: Optional[torch.device] = None,
     **method_kwargs,
 ) -> BaseMethod:
+    """
+    Construye el método de aprendizaje continuo a partir del nombre.
+    Soporta combinaciones tipo "<main>+ewc" o "ewc+<main>".
+    Aplica:
+      - filtrado de kwargs por método
+      - adaptación universal a BaseMethod (MethodAdapter) para métodos legacy
+    """
     device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
     lname = name.lower().strip()
 
@@ -95,6 +113,7 @@ def build_method(
             lam = ek.get("lam", None)
             assert lam is not None, "EWC requiere 'lam' (o 'ewc_lam')"
             fisher_batches = int(ek.get("fisher_batches", 100))
+            # EWCMethod ya hereda de BaseMethod
             return EWCMethod(model, float(lam), fisher_batches, loss_fn, device)
 
         if m == "rehearsal":
@@ -102,10 +121,15 @@ def build_method(
             cfg = RehearsalConfig(
                 buffer_size=int(rk.get("buffer_size", 10_000)),
                 replay_ratio=float(rk.get("replay_ratio", 0.2)),
+                replay_num_workers=rk.get("replay_num_workers", 0),
+                replay_pin_memory=bool(rk.get("replay_pin_memory", False)),
+                replay_persistent_workers=bool(rk.get("replay_persistent_workers", False)),
+                replay_drop_last=bool(rk.get("replay_drop_last", False)),
+                replay_shuffle=bool(rk.get("replay_shuffle", True)),
             )
             return _wrap(RehearsalMethod(cfg), loss_fn=loss_fn, device=device, name_hint="rehearsal")
 
-        # --- SNN methods ---
+        # --- SNN methods: se construyen como hasta ahora y se envuelven ---
         if m == "sa-snn":
             sk = _filter_kwargs_for("sa-snn", method_kwargs)
             cfg = SASNNConfig(**sk)
@@ -157,6 +181,11 @@ def build_method(
                 cfg = RehearsalConfig(
                     buffer_size=int(sub.get("buffer_size", 10_000)),
                     replay_ratio=float(sub.get("replay_ratio", 0.2)),
+                    replay_num_workers=sub.get("replay_num_workers", 0),
+                    replay_pin_memory=bool(sub.get("replay_pin_memory", False)),
+                    replay_persistent_workers=bool(sub.get("replay_persistent_workers", False)),
+                    replay_drop_last=bool(sub.get("replay_drop_last", False)),
+                    replay_shuffle=bool(sub.get("replay_shuffle", True)),
                 )
                 bases.append(_wrap(RehearsalMethod(cfg), loss_fn=loss_fn, device=device, name_hint="rehearsal"))
             elif pl == "naive":
@@ -170,7 +199,7 @@ def build_method(
         comp = CompositeMethod(bases)
         if not hasattr(comp, "name"):
             comp.name = "+".join(getattr(b, "name", b.__class__.__name__.lower()) for b in bases)
-        return MethodAdapter(comp, name=comp.name, device=device, loss_fn=loss_fn)
+        return _wrap(comp, loss_fn=loss_fn, device=device, name_hint=comp.name)
 
     # Método simple
     return _build_base(lname)

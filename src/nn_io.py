@@ -1,7 +1,7 @@
 # src/nn_io.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple, Union, Iterable
+from typing import Any, Dict, Optional, Union
 
 import torch
 from torch import nn
@@ -57,10 +57,11 @@ def _first_tensor(x: Any) -> Optional[torch.Tensor]:
     if torch.is_tensor(x):
         return x
     if isinstance(x, dict):
-        # heurística: prueba keys más comunes, si no, el primer tensor en values
+        # heurística: claves típicas primero
         for key in ("logits", "pred", "y_hat", "output", "out"):
-            if key in x and torch.is_tensor(x[key]):
-                return x[key]
+            v = x.get(key, None)
+            if torch.is_tensor(v):
+                return v
         for v in x.values():
             if torch.is_tensor(v):
                 return v
@@ -86,22 +87,21 @@ def _forward_with_cached_orientation(
     model: nn.Module,
     x: Any,
     y: Optional[torch.Tensor] = None,
-    *,
     device: Union[torch.device, str, None] = None,
     use_amp: bool = False,
     phase_hint: Optional[Dict[str, Any]] = None,
     phase: Optional[str] = None,
+    *args,
+    **kwargs,
 ) -> torch.Tensor:
     """
     Ejecuta el forward del modelo moviendo x al device, con autocast opcional,
     y devuelve SIEMPRE un Tensor (primer tensor de la salida), apto para losses.
 
     - Acepta salidas del modelo como Tensor | tuple | list | dict.
-    - No asume orientación temporal concreta; no reordena ejes (la data/preset ya lo fija).
+    - No asume orientación temporal concreta.
+    - 'device' puede venir posicional o por keyword (se acepta ambos).
     - 'phase_hint' y 'phase' se aceptan por compatibilidad; no se usan aquí.
-
-    Returns:
-        torch.Tensor: primer tensor extraído de la salida del modelo.
     """
     # Normaliza device
     if device is None:
@@ -118,15 +118,11 @@ def _forward_with_cached_orientation(
     dev_type = "cuda" if device.type == "cuda" else "cpu"
     amp_enabled = bool(use_amp and device.type == "cuda")
 
-    model_was_training = model.training
-    # No tocamos el modo: que decida el caller (EWC ya pone eval en estimate_fisher)
-
     with torch.amp.autocast(device_type=dev_type, enabled=amp_enabled):
         out = model(x_dev)
 
     y_hat = _first_tensor(out)
     if y_hat is None:
-        # Último intento: si 'out' es directamente un número/array convertible:
         if torch.is_tensor(out):
             y_hat = out
         else:
@@ -145,19 +141,12 @@ def _align_target_shape(y_hat: Any, y: torch.Tensor) -> torch.Tensor:
     Alinea 'y' con la forma de 'y_hat' en casos comunes de regresión de 1D:
     - (B,)  <->  (B,1)
 
-    También tolera que y_hat sea dict/tuple/list; en ese caso se extrae el primer tensor
-    para chequear su forma. Si no se puede extraer, devuelve 'y' tal cual.
-
-    Casos soportados:
-      * y_hat=(B,1), y=(B,)  --> y.unsqueeze(1)
-      * y_hat=(B,),  y=(B,1) --> y.squeeze(1)
-      * otros                --> y
+    Tolera y_hat como dict/tuple/list; extrae el primer tensor de referencia.
     """
     ref = _first_tensor(y_hat) if not torch.is_tensor(y_hat) else y_hat
     if ref is None or not torch.is_tensor(y):
         return y
 
-    # Limpieza de NaNs/Inf por robustez (no cambia la forma)
     if y.dtype.is_floating_point:
         y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -167,6 +156,5 @@ def _align_target_shape(y_hat: Any, y: torch.Tensor) -> torch.Tensor:
         if ref.ndim == 1 and y.ndim == 2 and y.shape[1] == 1:
             return y.squeeze(1)
     except Exception:
-        # En caso de algo raro, devolvemos y sin tocar
         return y
     return y

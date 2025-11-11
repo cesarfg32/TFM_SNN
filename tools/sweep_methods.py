@@ -1,7 +1,10 @@
 # tools/sweep_methods.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import argparse, json, sys
+
+import argparse
+import json
+import sys
 from pathlib import Path
 from copy import deepcopy
 
@@ -17,6 +20,7 @@ from src.runner import run_continual
 # ------------------------------- carga del sweep -------------------------------
 
 _POSSIBLE_KEYS = ("runs", "exps", "experiments", "sweep")
+
 
 def _read_sweep(path: Path):
     if not path.exists():
@@ -56,26 +60,40 @@ def _read_sweep(path: Path):
 
     raise TypeError("El sweep debe ser una lista o un dict con una lista de runs.")
 
+
 def _norm_run(run_spec):
     """
     Devuelve dict canónico con keys: method(str), params(dict), tag(str|None).
+
     Admite:
       - "ewc"
       - {"method":"ewc", "params": {...}, "tag": "..."}
+      - {"method":"ewc", "method_kwargs": {...}, "tag": "..."}  # compat
     """
     if isinstance(run_spec, str):
         return {"method": run_spec, "params": {}, "tag": None}
+
     if isinstance(run_spec, dict):
+        # Nombre del método
         method = run_spec.get("method", run_spec.get("name", None))
         if not isinstance(method, str) or not method:
             raise ValueError(f"Run mal formado: falta 'method' en {run_spec}")
-        params = run_spec.get("params", {}) or {}
+
+        # Preferimos 'params', pero aceptamos 'method_kwargs' como alias común
+        params = run_spec.get("params", None)
+        if params is None:
+            params = run_spec.get("method_kwargs", {}) or {}
         if not isinstance(params, dict):
-            raise ValueError(f"'params' debe ser dict en {run_spec}")
+            raise ValueError(f"'params'/'method_kwargs' debe ser dict en {run_spec}")
+
+        # Tag opcional
         tag = run_spec.get("tag", None)
         tag = str(tag) if tag is not None else None
+
         return {"method": method, "params": params, "tag": tag}
+
     raise TypeError(f"Tipo de run no soportado: {type(run_spec)}")
+
 
 def _build_task_list_from_cfg(cfg):
     prep = cfg.get("prep", {}) or {}
@@ -83,6 +101,7 @@ def _build_task_list_from_cfg(cfg):
     if not runs:
         runs = ["circuito1", "circuito2"]
     return [{"name": str(r)} for r in runs]
+
 
 # ---------------------------------- CLI main ----------------------------------
 
@@ -104,7 +123,15 @@ def main():
     make_loader_fn, make_model_fn, tfm = build_components_for(base_cfg)
 
     out_root = Path(args.out)
+
+    # -------- PRE-FLIGHT: listar todos los runs antes de ejecutar --------
     print(f"[INFO] {len(runs)} runs a ejecutar. OUT={out_root}")
+    for i, r in enumerate(runs, start=1):
+        method, params, tag = r["method"], r["params"], r["tag"]
+        pretty = f"{method} :: {tag}" if tag else method
+        print(f"  {i:02d}. {pretty}")
+    print()  # línea en blanco
+    # ---------------------------------------------------------------------
 
     # 4) Ejecuta cada run sobreescribiendo cfg.continual y naming.tag
     for i, r in enumerate(runs, start=1):
@@ -123,7 +150,6 @@ def main():
 
         task_list = _build_task_list_from_cfg(cfg)
         pretty = f"{method} :: {tag}" if tag else method
-        print(f"  {i:02d}. {pretty}")
 
         try:
             print(f"\n=== [{i}/{len(runs)}] {method} | tag={tag or 'exps'} ===\n")
@@ -141,6 +167,7 @@ def main():
             print(f"[ERROR] {type(e).__name__}: {e}")
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
