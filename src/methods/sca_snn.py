@@ -1,18 +1,20 @@
-# src/methods/sca_snn.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict
+
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from .base import BaseMethod
+
 # ------------------------------------------------------------
-# Configuración SCA-lite (completa)
+# Configuración SCA-lite
 # ------------------------------------------------------------
 @dataclass
 class SCAConfig:
-    attach_to: Optional[str] = None           # p.ej. "f6" o "fc"
+    attach_to: Optional[str] = None   # p.ej. "f6" en PilotNetSNN; None -> primera Linear
     flatten_spatial: bool = True
 
     # Similaridad (anchors)
@@ -37,7 +39,6 @@ class SCAConfig:
 
 
 # ------------------ utilidades de forma/similitud ------------------
-
 def _find_first_linear(m: nn.Module) -> Optional[nn.Module]:
     for mod in m.modules():
         if isinstance(mod, nn.Linear):
@@ -54,7 +55,7 @@ def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
 
 def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tuple[torch.Tensor, tuple[int, ...], bool]:
     """Normaliza a (T,B,N) para aplicar máscara por neurona."""
-    y = y.contiguous()
+    y = y.contiguous()  # SAFE: evita views raros antes de permutes/views
     orig = y.shape
 
     if y.ndim == 2:  # (B,N) ó (T,N), lo trataremos fuera si es ambiguo
@@ -93,6 +94,7 @@ def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, 
     return yTBN
 
 def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Tensor:
+    # SAFE: tipos y NaNs
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
     y = y.clamp(min=lo, max=hi)
     width = max(1e-8, (hi - lo))
@@ -122,6 +124,7 @@ def _similarity_from_kl(kl_vals: torch.Tensor) -> float:
     s = torch.clamp(s, 0.0, 1.0)
     return float(s.mean().item())
 
+# --------- helpers “seguros” por si necesitas bincount o topk en GPU ---------
 def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | None = None) -> torch.Tensor:
     idx = torch.nan_to_num(idx, nan=0.0, posinf=0.0, neginf=0.0)
     idx = idx.to(torch.int64).contiguous().clamp_(0, n_bins - 1)
@@ -143,11 +146,11 @@ def _topk_safe(score: torch.Tensor, k: int) -> torch.Tensor:
 
 
 # ---------------------------- método ----------------------------
-
-class SCA_SNN:
+class SCA_SNN(BaseMethod):
     name = "sca-snn"
 
     def __init__(self, **kw):
+        super().__init__()  # <- único añadido para integrar con BaseMethod
         self.cfg = SCAConfig(**{k: v for k, v in kw.items() if k in SCAConfig.__annotations__})
         self.name = (
             f"{self.name}"
@@ -174,7 +177,7 @@ class SCA_SNN:
         self._T_seq: int = int(self.cfg.T or 1)
         self._need_grad_hook: bool = True
 
-        # Suspender el gating durante la recogida de anclas
+        # Nuevo: suspender el gating durante la recogida de anclas
         self._suspend_mask: bool = False
 
     # -------- pre-forward: detectar T --------
@@ -197,9 +200,11 @@ class SCA_SNN:
         if not torch.is_tensor(out) or self._N is None or self._R is None:
             return out
 
+        # Si estamos recogiendo anclas, no aplicar máscara (evita sesgo/circularidad)
         if self._suspend_mask:
             return out
 
+        # Normaliza forma y aplica máscara
         yTBN, orig, need_back = _to_TBN(out, self._T_seq, self.cfg.flatten_spatial)
         yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
 
@@ -281,6 +286,7 @@ class SCA_SNN:
         lo, hi = float(self.cfg.bin_lo), float(self.cfg.bin_hi)
         max_batches = int(self.cfg.anchor_batches)
 
+        # Hook temporal: guarda out bruto (un solo buffer)
         grab = {"out": None}
         def _cap_hook(_m, _inp, out):
             if torch.is_tensor(out):
@@ -301,15 +307,17 @@ class SCA_SNN:
                 y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
                 B = int(y.shape[0])
 
+                # Desactiva autocast SOLO aquí para evitar NaNs en FP16 durante las anclas
                 dev_type = "cuda" if torch.cuda.is_available() else "cpu"
                 with torch.amp.autocast(device_type=dev_type, enabled=False):
-                    _ = model(x)
+                    _ = model(x)  # dispara hook
 
-                raw = grab["out"]; grab["out"] = None
+                raw = grab["out"]
+                grab["out"] = None
                 if raw is None:
                     continue
-                raw = raw.contiguous()
 
+                raw = raw.contiguous()
                 # Normalizar a (B,N)
                 if raw.ndim == 2:
                     if raw.shape[0] == B:
@@ -347,8 +355,9 @@ class SCA_SNN:
 
                 if F.device != device:
                     F = F.to(device, non_blocking=True)
-                F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()  # (B,N) FP32 estable
+                F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()  # (B,N), FP32 estable
 
+                # Binning y acumulación (modo robusto sin kernels raros)
                 bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
                 for b in range(num_bins):
                     mask = (bidx == b)
@@ -391,8 +400,9 @@ class SCA_SNN:
             S_vals.append(S)
         return float(min(S_vals)) if S_vals else 0.0
 
-    # ---------------- API ContinualMethod ----------------
+    # ---------------- API BaseMethod ----------------
     def penalty(self) -> torch.Tensor:
+        # Device robusto
         if self._Gacc is not None and isinstance(self._Gacc, torch.Tensor):
             dev = self._Gacc.device
         elif self._R is not None and isinstance(self._R, torch.Tensor):
@@ -400,6 +410,7 @@ class SCA_SNN:
         else:
             dev = torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu")
 
+        # Alinea _R al device de _Gacc si difieren
         if self._R is not None and self._Gacc is not None and self._R.device != self._Gacc.device:
             self._R = self._R.to(self._Gacc.device, non_blocking=True)
             dev = self._Gacc.device
@@ -416,6 +427,7 @@ class SCA_SNN:
                     q = torch.tensor(1.0, device=g.device if isinstance(g, torch.Tensor) else dev)
                 self._R.add_(g / q)
                 self._Gacc.zero_()
+
         return torch.zeros((), dtype=torch.float32, device=dev)
 
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
@@ -423,6 +435,7 @@ class SCA_SNN:
             self._model_pre_hook_handle = model.register_forward_pre_hook(
                 self._model_pre_forward_hook, with_kwargs=False
             )
+
         target = None
         if self.cfg.attach_to:
             target = _get_by_path(model, self.cfg.attach_to)
@@ -494,8 +507,8 @@ class SCA_SNN:
 
         if self._R is not None and self._N:
             rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
-            act_frac = float((torch.sigmoid(self._R) > rho).float().mean().item()) * 100.0
-            print(f"[SCA] after_task: act≈{act_frac:.1f}% | rho={rho:.3f} | sim_min={self._sim_min:.3f}")
+            act_frac = float((torch.sigmoid(self._R) > rho).float().mean().item())
+            print(f"[SCA] after_task: act≈{100.0*act_frac:.1f}% | rho={rho:.3f} | sim_min={self._sim_min:.3f}")
 
         if self.cfg.verbose:
             used = None
@@ -521,4 +534,21 @@ class SCA_SNN:
         self._N = None
         self._R = None
         self._Gacc = None
-        self._suspend_mask = False  # reset
+        self._suspend_mask = False  # reset de seguridad
+
+    # introspección
+    def get_state(self) -> Dict[str, float]:
+        out = {
+            "N": int(self._N or 0),
+            "sim_min": float(self._sim_min),
+            "R_mean": (float(self._R.mean().item()) if isinstance(self._R, torch.Tensor) and self._R.numel() else 0.0),
+            "R_p95": (float(self._R.quantile(0.95).item()) if isinstance(self._R, torch.Tensor) and self._R.numel() else 0.0),
+            "Gacc_mean": (float(self._Gacc.mean().item()) if isinstance(self._Gacc, torch.Tensor) and self._Gacc.numel() else 0.0),
+            "beta": float(self.cfg.beta),
+            "bias": float(self.cfg.bias),
+            "soft_mask_temp": float(self.cfg.soft_mask_temp),
+            "habit_decay": float(self.cfg.habit_decay),
+            "num_bins": int(self.cfg.num_bins),
+            "anchor_batches": int(self.cfg.anchor_batches),
+        }
+        return out

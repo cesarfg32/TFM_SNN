@@ -1,13 +1,15 @@
-# src/methods/naive.py
 from __future__ import annotations
-from torch import nn
 import torch
+from torch import nn
+from .base import BaseMethod
 
-class Naive:
+class Naive(BaseMethod):
     name = "naive"
-    def __init__(self): pass
+    def __init__(self, *, device=None, loss_fn: nn.Module | None = None):
+        super().__init__(device=device, loss_fn=loss_fn)
+
     def penalty(self) -> torch.Tensor:
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        return torch.zeros((), dtype=torch.float32, device=dev)
-    def before_task(self, model: nn.Module, train_loader, val_loader): pass
-    def after_task(self,  model: nn.Module, train_loader, val_loader): pass
+        return torch.zeros((), dtype=torch.float32, device=self.device)
+
+    def before_task(self, model: nn.Module, train_loader, val_loader): ...
+    def after_task(self,  model: nn.Module, train_loader, val_loader): ...

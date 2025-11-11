@@ -1,14 +1,13 @@
-# src/methods/as_snn.py
 # -*- coding: utf-8 -*-
-"""AS-SNN (Activity Sparsity + Synaptic Scaling)"""
 from __future__ import annotations
 from typing import Optional, Tuple, Dict, List, Any, Union
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from .base import BaseMethod
 
-def _resolve_modules_by_name(model: nn.Module, name_substr: str):
-    out = []
+def _resolve_modules_by_name(model: nn.Module, name_substr: str) -> List[tuple[str, nn.Module]]:
+    out: List[tuple[str, nn.Module]] = []
     low = name_substr.lower()
     for n, m in model.named_modules():
         if low in n.lower():
@@ -27,10 +26,11 @@ def _norm_scale_clip(sc: Any) -> Tuple[float, float]:
 
 def _first_tensor(x) -> Optional[torch.Tensor]:
     if isinstance(x, torch.Tensor): return x
-    if isinstance(x, (tuple, list)) and x: return x[0] if isinstance(x[0], torch.Tensor) else None
+    if isinstance(x, (tuple, list)) and x:
+        return x[0] if isinstance(x[0], torch.Tensor) else None
     return None
 
-class AS_SNN:
+class AS_SNN(BaseMethod):
     """
     Regularización de actividad con gradiente (por-capa) + synaptic scaling opcional.
     """
@@ -38,6 +38,7 @@ class AS_SNN:
 
     def __init__(
         self,
+        *,
         lambda_a: float = 2.5,
         gamma_ratio: float = 0.5,
         ema: float = 0.9,
@@ -51,8 +52,11 @@ class AS_SNN:
         name_suffix: str = "",
         activity_verbose: bool = False,
         activity_every: int = 100,
+        device: Optional[torch.device] = None,
+        loss_fn: Optional[nn.Module] = None,
         **kw,
     ) -> None:
+        super().__init__(device=device, loss_fn=loss_fn)
         assert 0.0 <= gamma_ratio <= 1.0
         assert 0.0 < ema < 1.0
         assert lambda_a >= 0.0
@@ -65,24 +69,24 @@ class AS_SNN:
         self.attach_to = attach_to
         self.do_synaptic_scaling = bool(do_synaptic_scaling)
         self.scale_clip = _norm_scale_clip(scale_clip)
+        assert self.scale_clip[0] > 0 and self.scale_clip[0] <= self.scale_clip[1]
         self.scale_bias = bool(scale_bias)
         self.eps = float(eps)
 
-        # Política por defecto
         if measure_at is None:
             self.measure_at = "modules" if (attach_to is not None) else "input"
         else:
             assert measure_at in ("modules", "input", "both")
             self.measure_at = measure_at
 
-        # Nombre legible
-        tag = f"as-snn_gr_{self.gamma_ratio:g}_lam_{self.lambda_a:g}"
+        tag = "as-snn"
+        tag += f"_gr_{self.gamma_ratio:g}"
+        tag += f"_lam_{self.lambda_a:g}"
         if self.attach_to: tag += f"_att_{self.attach_to}"
         if self.do_synaptic_scaling: tag += "_scale_on"
         if name_suffix: tag += f"_{name_suffix}"
         self.name = tag
 
-        # Estado interno
         self._device: Optional[torch.device] = None
         self._batch_penalties: List[torch.Tensor] = []
         self._alpha_in_ema: Optional[torch.Tensor] = None
@@ -94,15 +98,14 @@ class AS_SNN:
         self.activity_every = int(activity_every)
         self._batch_idx = 0
 
+    # helpers + hooks (idéntico a tu versión anterior) ...
     @staticmethod
     def _as_float_unit(x: torch.Tensor) -> torch.Tensor:
-        if not x.dtype.is_floating_point:
-            x = x.float()
+        if not x.dtype.is_floating_point: x = x.float()
         return torch.clamp(x, 0.0, 1.0)
 
     def _maybe_on_device(self, t: torch.Tensor) -> None:
-        if self._device is None:
-            self._device = t.device
+        if self._device is None: self._device = t.device
 
     def _ensure_layer_entry(self, name: str, device: torch.device, init_val: torch.Tensor) -> None:
         if name not in self._layer_stats:
@@ -115,8 +118,8 @@ class AS_SNN:
             for k in ("alpha_ema", "alpha_last"):
                 self._layer_stats[name][k] = self._layer_stats[name][k].to(device)  # type: ignore[index]
 
-    def _phi(self, a: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-        return (a - g).pow(2) if self.penalty_mode == "l2" else torch.abs(a - g)
+    def _phi(self, a: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+        return (a - gamma).pow(2) if self.penalty_mode == "l2" else torch.abs(a - gamma)
 
     def _pre_forward_hook(self, module: nn.Module, inputs):
         self._batch_penalties.clear()
@@ -125,12 +128,8 @@ class AS_SNN:
             x = _first_tensor(inputs[0]) if not isinstance(inputs[0], torch.Tensor) else inputs[0]
         elif isinstance(inputs, torch.Tensor):
             x = inputs
-        if x is None or not isinstance(x, torch.Tensor):
-            return
-
-        self._maybe_on_device(x)
-        device = x.device
-
+        if x is None or not isinstance(x, torch.Tensor): return
+        self._maybe_on_device(x); device = x.device
         if self.measure_at in ("input", "both"):
             a_now = self._as_float_unit(x).mean()
             if self._alpha_in_ema is None:
@@ -139,10 +138,8 @@ class AS_SNN:
             else:
                 self._alpha_in_ema.mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema))
                 self._alpha_in_last.copy_(a_now.detach())
-
-            g = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
-            self._batch_penalties.append(self.lambda_a * self._phi(a_now, g))
-
+            gamma = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
+            self._batch_penalties.append(self.lambda_a * self._phi(a_now, gamma))
         self._batch_idx += 1
         if self.activity_verbose and (self._batch_idx % max(1, self.activity_every)) == 0:
             try:
@@ -153,28 +150,23 @@ class AS_SNN:
 
     def _make_forward_hook(self, name: str):
         def _hook(module: nn.Module, inputs, output):
-            y = output if isinstance(output, torch.Tensor) else _first_tensor(output)
-            if y is None:
-                return
-            self._maybe_on_device(y)
-            device = y.device
-
-            a_now = self._as_float_unit(y).mean()  # escalar con grafo
+            y = _first_tensor(output) if not isinstance(output, torch.Tensor) else output
+            if y is None: return
+            self._maybe_on_device(y); device = y.device
+            a_now = self._as_float_unit(y).mean()
             self._ensure_layer_entry(name, device, a_now)
-
             self._layer_stats[name]["alpha_ema"].mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema))  # type: ignore[index]
             self._layer_stats[name]["alpha_last"].copy_(a_now.detach())  # type: ignore[index]
-
-            g = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
-            self._batch_penalties.append(self.lambda_a * self._phi(a_now, g))
+            gamma = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
+            self._batch_penalties.append(self.lambda_a * self._phi(a_now, gamma))
         return _hook
 
+    # API BaseMethod
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
         if self._pre_hook_handle is None:
             self._pre_hook_handle = model.register_forward_pre_hook(self._pre_forward_hook, with_kwargs=False)
-
         if self.measure_at in ("modules", "both") and not self._fw_handles:
-            modules_to_hook = []
+            modules_to_hook: List[tuple[str, nn.Module]] = []
             if self.attach_to:
                 modules_to_hook.extend(_resolve_modules_by_name(model, self.attach_to))
             else:
@@ -183,11 +175,9 @@ class AS_SNN:
                         modules_to_hook.append((n, m))
             registered = set()
             for name, mod in modules_to_hook:
-                if mod in registered:
-                    continue
+                if mod in registered: continue
                 h = mod.register_forward_hook(self._make_forward_hook(name), with_kwargs=False)
                 self._fw_handles.append(h)
-
                 p0 = next(mod.parameters(), None)
                 dev = p0.device if p0 is not None else (self._device or torch.device("cpu"))
                 self._ensure_layer_entry(name, dev, torch.zeros((), device=dev))
@@ -202,17 +192,14 @@ class AS_SNN:
 
     @torch.no_grad()
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
-        if not self.do_synaptic_scaling:
-            return
+        if not self.do_synaptic_scaling: return
         lo, hi = self.scale_clip
         for name, stats in self._layer_stats.items():
             alpha_ema = stats.get("alpha_ema", None)
             mod = stats.get("module", None)
-            if alpha_ema is None or mod is None or not hasattr(mod, "weight"):
-                continue
+            if alpha_ema is None or mod is None or not hasattr(mod, "weight"): continue
             a = float(alpha_ema.item())
-            if a <= 0.0:
-                continue
+            if a <= 0.0: continue
             s_nominal = self.gamma_ratio / max(a, self.eps)
             s = float(max(lo, min(hi, s_nominal)))
             try:
@@ -233,7 +220,7 @@ class AS_SNN:
                 except Exception: pass
             self._fw_handles.clear()
 
-    # Introspección (opcional)
+    # introspección (igual que tu versión)
     def get_activity_state(self) -> dict:
         out = {
             "gamma_ratio": self.gamma_ratio,

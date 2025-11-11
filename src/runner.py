@@ -269,7 +269,6 @@ def run_continual(
 
     method = cont["method"].lower()
     method_kwargs = dict(cont.get("params", {}))
-    method_kwargs.setdefault("T", T)
     method_obj = build_method(method, model, loss_fn=loss_fn, device=device, **method_kwargs)
 
     # Logging opcional por método/submétodos

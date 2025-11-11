@@ -1,19 +1,19 @@
-# src/methods/composite.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import Sequence
 from torch import nn
 import torch
-from .api import ContinualMethod
+from .base import BaseMethod
 
-class CompositeMethod(ContinualMethod):
+class CompositeMethod(BaseMethod):
     """
     Composite de métodos de aprendizaje continuo.
-    - Suma las penalizaciones de cada submétodo.
-    - Propaga before/after hooks a todos.
-    - Encadena prepare_train_loader si existe.
+    - Suma penalizaciones.
+    - Propaga hooks.
+    - Encadena prepare_train_loader() si existe.
     """
-    def __init__(self, methods: Sequence[ContinualMethod]):
+    def __init__(self, methods: Sequence[BaseMethod]):
+        super().__init__(device=(methods[0].device if methods else None))
         assert len(methods) >= 1, "CompositeMethod requiere al menos un método"
         self.methods = list(methods)
         self.name = "+".join(m.name for m in self.methods)
@@ -22,8 +22,33 @@ class CompositeMethod(ContinualMethod):
         total: torch.Tensor | None = None
         for m in self.methods:
             p = m.penalty()
-            total = p if total is None else (total + p.to(total.device))
-        return total  # type: ignore[return-value]
+            if total is None:
+                total = p
+            else:
+                if p.device != total.device:
+                    p = p.to(total.device)
+                total = total + p
+        if total is None:
+            total = torch.zeros((), device=self.device, dtype=torch.float32)
+        return total
+
+    def before_task(self, model: nn.Module, train_loader, val_loader) -> None:
+        for m in self.methods: m.before_task(model, train_loader, val_loader)
+
+    def after_task(self, model: nn.Module, train_loader, val_loader) -> None:
+        for m in self.methods: m.after_task(model, train_loader, val_loader)
+
+    def before_epoch(self, model: nn.Module, epoch: int) -> None:
+        for m in self.methods: m.before_epoch(model, epoch)
+
+    def after_epoch(self, model: nn.Module, epoch: int) -> None:
+        for m in self.methods: m.after_epoch(model, epoch)
+
+    def before_batch(self, model: nn.Module, batch) -> None:
+        for m in self.methods: m.before_batch(model, batch)
+
+    def after_batch(self, model: nn.Module, batch, loss) -> None:
+        for m in self.methods: m.after_batch(model, batch, loss)
 
     def prepare_train_loader(self, train_loader):
         loader = train_loader
@@ -31,11 +56,3 @@ class CompositeMethod(ContinualMethod):
             if hasattr(m, "prepare_train_loader"):
                 loader = m.prepare_train_loader(loader)  # type: ignore[attr-defined]
         return loader
-
-    def before_task(self, model: nn.Module, train_loader, val_loader) -> None:
-        for m in self.methods:
-            m.before_task(model, train_loader, val_loader)
-
-    def after_task(self, model: nn.Module, train_loader, val_loader) -> None:
-        for m in self.methods:
-            m.after_task(model, train_loader, val_loader)
