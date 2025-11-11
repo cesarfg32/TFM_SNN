@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 import inspect
 import random
-import json
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -34,6 +33,15 @@ def seed_worker(worker_id: int) -> None:
     _np.random.seed(worker_seed)
     random.seed(worker_seed)
 
+def set_seeds(seed: int = 42) -> None:
+    """Fija semillas para obtener resultados reproducibles."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # Si necesitas reproducibilidad estricta de cudnn:
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
 
 # ---------------------------------------------------------------------
 # Collate para H5 (spikes offline)
