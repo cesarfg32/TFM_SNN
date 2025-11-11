@@ -1,70 +1,60 @@
 # src/utils.py
 # -*- coding: utf-8 -*-
-"""Utilidades comunes del proyecto TFM_SNN.
+"""
+Utilidades comunes del proyecto TFM_SNN (versión limpia, sin back-compat).
+- Reproducibilidad (seed_worker)
+- Collate para H5 (collate_h5)
+- Sampler balanceado por bins (steering)
+- DataLoaders desde CSV (runtime encode) u H5 (offline)
+- Selector de H5 por atributos y fábrica de loaders por preset
 
-Novedades:
-- Opción de balanceo por bins de 'steering' en el split de entrenamiento usando
-  WeightedRandomSampler (reduce el sesgo a rectas).
-- Opción de pasar configuración de augmentación para el split de entrenamiento.
-- Unificación de collate/seed a utilidades globales (picklables) y propagación segura
-  de pin_memory_device desde preset (solo si la versión de PyTorch lo soporta).
-
-Retrocompatibilidad:
-- Si NO activas 'balance_train' ni pasas 'aug_train', todo se comporta como antes.
+NOTA: No exporta load_preset ni builders de componentes; eso vive en src.utils_components.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Union, List, Dict, Any, Tuple
-
+from typing import Optional, List, Dict, Any, Tuple
 import inspect
 import random
 import json
-import yaml
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from .datasets import UdacityCSV, ImageTransform, AugmentConfig, H5SpikesDataset
-from .loader_utils import collate_h5, seed_worker
 
 
 # ---------------------------------------------------------------------
-# Reproducibilidad global (Python/NumPy/Torch/CUDA)
+# Reproducibilidad por worker (DataLoader)
 # ---------------------------------------------------------------------
-def set_seeds(seed: int = 42) -> None:
-    """Fija semillas para obtener resultados reproducibles."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    # Para reproducibilidad estricta (si la necesitas):
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
+def seed_worker(worker_id: int) -> None:
+    """Inicializa RNGs por worker para DataLoader multiproceso."""
+    import numpy as _np
+    worker_seed = torch.initial_seed() % 2**32
+    _np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 # ---------------------------------------------------------------------
-# Presets de ejecución (fast/std/accurate) desde YAML
+# Collate para H5 (spikes offline)
 # ---------------------------------------------------------------------
-def load_preset(path_yaml: Path, name: str) -> dict:
-    with open(path_yaml, "r", encoding="utf-8") as f:
-        presets = yaml.safe_load(f)
-    assert name in presets, f"Preset no encontrado: {name} en {path_yaml}"
-    cfg = presets[name]
-    # Validación mínima
-    for k in ("model", "data", "optim", "continual", "naming"):
-        assert k in cfg, f"Preset '{name}' incompleto: falta '{k}'"
-    return cfg
-
-
-# ---------------------------------------------------------------------
-# Sampler balanceado por bins para entrenamiento
-# ---------------------------------------------------------------------
-def _make_balanced_sampler(labels: List[float], bins: int = 21, smooth_eps: float = 1e-3) -> WeightedRandomSampler:
+def collate_h5(batch):
     """
-    Crea un WeightedRandomSampler que muestrea de forma aproximadamente uniforme
-    por bins de 'steering'.
+    Collate para tensores H5 (spikes) -> (xb, yb) apilados.
+    Espera pares (x, y).
     """
+    xs, ys = zip(*batch)
+    xb = torch.stack(xs, dim=0).contiguous()
+    yb = torch.as_tensor(ys).float()
+    return xb, yb
+
+
+# ---------------------------------------------------------------------
+# Sampler balanceado por bins para entrenamiento (reduce sesgo a rectas)
+# ---------------------------------------------------------------------
+def _make_balanced_sampler(labels: List[float],
+                           bins: int = 50,
+                           smooth_eps: float = 1e-3) -> WeightedRandomSampler:
     y = np.asarray(labels, dtype=np.float32)
     lo = min(-1.0, float(y.min()))
     hi = max( 1.0, float(y.max()))
@@ -80,9 +70,10 @@ def _make_balanced_sampler(labels: List[float], bins: int = 21, smooth_eps: floa
 
 
 # ---------------------------------------------------------------------
-# DataLoaders con opción de siembra, augmentación y balanceo (train)
+# DataLoaders CSV (con augment opcional y balanceo) y H5
 # ---------------------------------------------------------------------
 def make_loaders_from_csvs(
+    *,
     base_dir: Path,
     train_csv: Path,
     val_csv: Path,
@@ -93,36 +84,32 @@ def make_loaders_from_csvs(
     gain: float,
     tfm: ImageTransform,
     seed: Optional[int] = None,
-    num_workers: int = 8,
+    num_workers: int = 4,
     pin_memory: bool = True,
     shuffle_train: bool = True,
-    persistent_workers: bool = True,
-    prefetch_factor: Optional[int] = 4,
-    # --- Novedades ---
+    persistent_workers: bool = False,
+    prefetch_factor: Optional[int] = 2,
     aug_train: Optional[AugmentConfig] = None,
     balance_train: bool = False,
     balance_bins: int = 50,
     balance_smooth_eps: float = 1e-3,
-    # pin memory device (se propaga si la versión de DataLoader lo soporta)
     pin_memory_device: str = "cuda",
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """
-    Crea DataLoaders para train/val/test del simulador Udacity con codificación temporal on-the-fly.
-    """
+    """Crea DataLoaders desde CSV (imágenes) con o sin runtime encode."""
     # Datasets
     tr_ds = UdacityCSV(train_csv, base_dir, encoder=encoder, T=T, gain=gain, tfm=tfm, aug=aug_train)
     va_ds = UdacityCSV(val_csv,   base_dir, encoder=encoder, T=T, gain=gain, tfm=tfm, aug=None)
     te_ds = UdacityCSV(test_csv,  base_dir, encoder=encoder, T=T, gain=gain, tfm=tfm, aug=None)
 
-    # Siembra opcional: controla orden del sampler/shuffle y estados de los workers
+    # Siembra opcional
     generator = None
     worker_fn = None
     if seed is not None:
         generator = torch.Generator()
         generator.manual_seed(int(seed))
-        worker_fn = seed_worker  # <- global
+        worker_fn = seed_worker
 
-    # Sampler balanceado (solo train) — si se activa, desactiva shuffle_train
+    # Balanceo solo en train: desactiva shuffle si se usa sampler
     train_sampler = None
     effective_shuffle = bool(shuffle_train)
     if balance_train:
@@ -131,7 +118,7 @@ def make_loaders_from_csvs(
         )
         effective_shuffle = False
 
-    # Normaliza flags del DataLoader según num_workers
+    # Normaliza workers
     if num_workers <= 0:
         persistent_workers = False
         prefetch_factor = None
@@ -139,7 +126,7 @@ def make_loaders_from_csvs(
         if prefetch_factor is None:
             prefetch_factor = 2
 
-    # Soporte condicional de pin_memory_device (solo si la firma de DataLoader lo acepta)
+    # pin_memory_device si DataLoader lo soporta
     _HAS_PIN_DEVICE = "pin_memory_device" in inspect.signature(DataLoader).parameters
     _dl_extra: Dict[str, Any] = {}
     if pin_memory and _HAS_PIN_DEVICE and pin_memory_device:
@@ -156,6 +143,7 @@ def make_loaders_from_csvs(
         prefetch_factor=prefetch_factor,
         generator=generator,
         worker_init_fn=worker_fn,
+        drop_last=True,
         **_dl_extra,
     )
     val_loader = DataLoader(
@@ -168,6 +156,7 @@ def make_loaders_from_csvs(
         prefetch_factor=prefetch_factor,
         generator=generator,
         worker_init_fn=worker_fn,
+        drop_last=False,
         **_dl_extra,
     )
     test_loader = DataLoader(
@@ -180,26 +169,26 @@ def make_loaders_from_csvs(
         prefetch_factor=prefetch_factor,
         generator=generator,
         worker_init_fn=worker_fn,
+        drop_last=False,
         **_dl_extra,
     )
     return train_loader, val_loader, test_loader
 
 
 def make_loaders_from_h5(
+    *,
     train_h5: Path,
     val_h5: Path,
     test_h5: Path,
-    *,
     batch_size: int,
     seed: int | None,
     num_workers: int = 4,
     pin_memory: bool = True,
-    persistent_workers: bool = True,
+    persistent_workers: bool = False,
     prefetch_factor: int | None = 2,
     pin_memory_device: str = "cuda",
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Crea DataLoaders desde H5 (spikes offline) con orientación (T,B,C,H,W) en el batch."""
-    # Siembra opcional para reproducibilidad
+    """Crea DataLoaders desde H5 (spikes offline)."""
     g = None
     wfn = None
     if seed is not None:
@@ -223,7 +212,7 @@ def make_loaders_from_h5(
             persistent_workers=(persistent_workers and num_workers > 0),
             prefetch_factor=(prefetch_factor if (num_workers > 0) else None),
             drop_last=False,
-            collate_fn=collate_h5,  # global y picklable
+            collate_fn=collate_h5,
             worker_init_fn=wfn,
             **_dl_extra,
         )
@@ -231,8 +220,11 @@ def make_loaders_from_h5(
     return _mk(train_h5, True), _mk(val_h5, False), _mk(test_h5, False)
 
 
-def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int, gain: float, tfm: ImageTransform) -> Path:
-    """Selecciona el .h5 que casa con (encoder, T, gain, tamaño y gris/color del transform)."""
+# ---------------------------------------------------------------------
+# Selección de H5 por atributos (enc/T/gain/size/grayscale)
+# ---------------------------------------------------------------------
+def _pick_h5_by_attrs(base_proc: Path, split: str, *,
+                      encoder: str, T: int, gain: float, tfm: ImageTransform) -> Path:
     import h5py
     want_enc  = str(encoder).lower()
     want_T    = int(T)
@@ -263,8 +255,16 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *, encoder: str, T: int, gain
     )
 
 
-def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime: bool):
-    """Devuelve make_loader_fn(...) que elige entre H5 offline o CSV + runtime encode."""
+# ---------------------------------------------------------------------
+# Fábrica de loaders según preset (elige H5 offline o CSV + runtime)
+# ---------------------------------------------------------------------
+def build_make_loader_fn(root: Path, *,
+                         use_offline_spikes: bool,
+                         encode_runtime: bool):
+    """
+    Devuelve make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs)
+    que construye DataLoaders coherentes con el preset (offline H5 o CSV).
+    """
     proc_root = root / "data" / "processed"
     raw_root  = root / "data" / "raw" / "udacity"
 
@@ -272,27 +272,24 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
         p = Path(p)
         return p if p.is_absolute() else (root / p)
 
-    # claves permitidas para DataLoaders
     DL_ALLOWED = {
         "num_workers", "pin_memory", "persistent_workers", "prefetch_factor",
         "shuffle_train", "aug_train",
         "balance_train", "balance_bins", "balance_smooth_eps",
-        "pin_memory_device",  # ← ahora permitido
+        "pin_memory_device",
     }
 
     def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
         run = task["name"]
-        base_raw  = raw_root / run
 
-        # Normaliza kwargs del DataLoader (única fuente de verdad)
+        # Normaliza kwargs
         dl_kwargs = dict(dl_kwargs or {})
         clean_dl = {k: v for k, v in dl_kwargs.items() if (k in DL_ALLOWED and v is not None)}
-
         if int(clean_dl.get("num_workers", 0)) <= 0:
             clean_dl["persistent_workers"] = False
             clean_dl["prefetch_factor"] = None
 
-        # --- H5 offline ---
+        # H5 offline si aplica
         if use_offline_spikes and encoder in {"rate", "latency", "raw"}:
             tr_h5 = _pick_h5_by_attrs(proc_root / run, "train", encoder=encoder, T=T, gain=gain, tfm=tfm)
             va_h5 = _pick_h5_by_attrs(proc_root / run, "val",   encoder=encoder, T=T, gain=gain, tfm=tfm)
@@ -302,23 +299,23 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
                 batch_size=batch_size, seed=seed,
                 num_workers=clean_dl.get("num_workers", 4),
                 pin_memory=clean_dl.get("pin_memory", True),
-                persistent_workers=clean_dl.get("persistent_workers", True),
+                persistent_workers=clean_dl.get("persistent_workers", False),
                 prefetch_factor=clean_dl.get("prefetch_factor", 2),
                 pin_memory_device=clean_dl.get("pin_memory_device", "cuda"),
             )
 
-        # --- CSV (imágenes) con/ sin runtime encode ---
-        paths    = task["paths"]
-        tr_csv = _abs(paths["train"])
-        va_csv = _abs(paths["val"])
-        te_csv = _abs(paths["test"])
+        # CSV (imágenes) con/ sin runtime encode
+        paths   = task["paths"]
+        tr_csv  = _abs(paths["train"])
+        va_csv  = _abs(paths["val"])
+        te_csv  = _abs(paths["test"])
         missing = [p for p in (tr_csv, va_csv, te_csv) if not p.exists()]
         if missing:
             raise FileNotFoundError(f"CSV no encontrado: {missing}. CWD={Path.cwd()} ROOT={root}")
 
-        encoder_for_loader = "image" if (encode_runtime and encoder in {"rate","latency","raw"}) else encoder
+        encoder_for_loader = "image" if (encode_runtime and encoder in {"rate", "latency", "raw"}) else encoder
         return make_loaders_from_csvs(
-            base_dir=base_raw,
+            base_dir=raw_root / run,
             train_csv=tr_csv, val_csv=va_csv, test_csv=te_csv,
             batch_size=batch_size,
             encoder=encoder_for_loader,
@@ -327,73 +324,3 @@ def build_make_loader_fn(root: Path, *, use_offline_spikes: bool, encode_runtime
         )
 
     return make_loader_fn
-
-
-# ---------------------------------------------------------------------
-# Helpers comunes para notebooks/tools: task_list y factories por preset
-# ---------------------------------------------------------------------
-def build_task_list_for(cfg: dict, root: Path):
-    """Devuelve (task_list, tasks_file_path) respetando 'prep.use_balanced_tasks'."""
-    proc = root / "data" / "processed"
-    use_bal = bool(cfg.get("prep", {}).get("use_balanced_tasks", False))
-    tb_name = (cfg.get("prep", {}).get("tasks_balanced_file_name") or "tasks_balanced.json")
-    t_name  = (cfg.get("prep", {}).get("tasks_file_name") or "tasks.json")
-
-    tasks_file = (proc / tb_name) if (use_bal and (proc / tb_name).exists()) else (proc / t_name)
-    if not tasks_file.exists():
-        raise FileNotFoundError(
-            f"No existe {tasks_file.name} en {proc}. Genera los splits con tu pipeline "
-            f"(p.ej. tools/prep_offline.py) antes de entrenar."
-        )
-    tasks_json = json.loads(tasks_file.read_text(encoding="utf-8"))
-    task_list = [{"name": n, "paths": tasks_json["splits"][n]} for n in tasks_json["tasks_order"]]
-    return task_list, tasks_file
-
-
-def build_components_for(cfg: dict, root: Path):
-    """
-    Construye:
-      - tfm: ImageTransform coherente con el preset
-      - make_loader_fn: elige H5 offline o CSV + runtime encode
-      - make_model_fn: factory de modelo
-    """
-    # import diferido para evitar ciclos con src.models
-    from src.models import build_model
-
-    # --- Transform ---
-    tfm = ImageTransform(
-        int(cfg["model"]["img_w"]),
-        int(cfg["model"]["img_h"]),
-        to_gray=bool(cfg["model"]["to_gray"]),
-        crop_top=None
-    )
-
-    # --- Loader factory base ---
-    use_offline = bool(cfg["data"].get("use_offline_spikes", False))
-    runtime_enc = bool(cfg["data"].get("encode_runtime", False))
-    _raw_mk = build_make_loader_fn(root=root, use_offline_spikes=use_offline, encode_runtime=runtime_enc)
-
-    # --- Kwargs coherentes con cfg ---
-    aug_cfg = AugmentConfig(**(cfg["data"].get("aug_train") or {})) if cfg["data"].get("aug_train") else None
-    _DL_KW = dict(
-        num_workers=int(cfg["data"].get("num_workers") or 0),
-        prefetch_factor=int(cfg["data"].get("prefetch_factor") or 2),
-        pin_memory=bool(cfg["data"].get("pin_memory", True)),
-        persistent_workers=bool(cfg["data"].get("persistent_workers", True)),
-        pin_memory_device=str(cfg["data"].get("pin_memory_device", "cuda")),
-        aug_train=aug_cfg,
-        balance_train=bool(cfg["data"].get("balance_online", False)),
-        balance_bins=int(cfg["data"].get("balance_bins") or 50),
-        balance_smooth_eps=float(cfg["data"].get("balance_smooth_eps") or 1e-3),
-    )
-
-    def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
-        return _raw_mk(
-            task=task, batch_size=batch_size, encoder=encoder, T=T, gain=gain,
-            tfm=tfm, seed=seed, **{**_DL_KW, **(dl_kwargs or {})}
-        )
-
-    def make_model_fn(tfm_):
-        return build_model(cfg["model"]["name"], tfm_, beta=0.9, threshold=0.5)
-
-    return tfm, make_loader_fn, make_model_fn

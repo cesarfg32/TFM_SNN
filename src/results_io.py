@@ -484,3 +484,15 @@ def build_results_table(outputs_root: Path | str) -> pd.DataFrame:
     if sort_cols:
         df = df.sort_values(sort_cols, na_position="last", ignore_index=True)
     return df
+
+# ============================================================
+# Back-compat de nombres antiguos usados en notebooks viejos
+# ============================================================
+
+def results_table_fromdisk(*args, **kwargs):
+    """Alias histórico -> build_results_table"""
+    return build_results_table(*args, **kwargs)
+
+def merge_selection_runs(*args, **kwargs):
+    """Alias histórico: ahora lo resuelve build_results_table/selection flows."""
+    return build_results_table(*args, **kwargs)
