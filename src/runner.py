@@ -302,13 +302,29 @@ def run_continual(
 
     # Logging opcional por método/submétodos
     log_root = (cfg.get("logging", {}) or {})
+
     def _apply_log_section(obj, key: str):
         sect = log_root.get(key, {}) or {}
+
+        # Aliases universales (no rompen nada; conviven con las claves originales)
+        if 'verbose' in sect:
+            for attr in ('inner_verbose', 'activity_verbose', 'trace_verbose', 'verbose'):
+                if hasattr(obj, attr):
+                    try: setattr(obj, attr, bool(sect['verbose']))
+                    except Exception: pass
+
+        if 'every' in sect:
+            ev = int(sect['every'])
+            for attr in ('inner_every', 'activity_every', 'trace_every', 'log_every'):
+                if hasattr(obj, attr):
+                    try: setattr(obj, attr, ev)
+                    except Exception: pass
+
+        # Claves específicas (p.ej. fisher_verbose) siguen funcionando
         for k, v in sect.items():
-            try:
-                setattr(obj, k, v)
-            except Exception:
-                pass
+            try: setattr(obj, k, v)
+            except Exception: pass
+
     _apply_log_section(method_obj, method.lower())
     if hasattr(method_obj, "methods"):
         try:
@@ -320,8 +336,6 @@ def run_continual(
             pass
 
     tag = method_obj.name
-    if ("ewc" in tag) and ("lam" in method_kwargs):
-        tag = f"{tag}_lam_{float(method_kwargs['lam']):.0e}"
     tag_extra = naming.get("tag", "")
     if tag_extra:
         tag = f"{tag}_{tag_extra}"

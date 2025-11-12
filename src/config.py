@@ -131,21 +131,70 @@ def _resolve_from_collection(key: str) -> Optional[tuple[Path, Dict[str, Any]]]:
             return file, presets[key]
     return None
 
-def load_preset(name_or_path: Union[str, os.PathLike]) -> Dict[str, Any]:
+def load_preset(
+    name_or_path: Union[str, os.PathLike],
+    preset_key: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Carga un preset:
-      - Si 'name_or_path' es ruta a YAML: lo lee tal cual.
-      - Si 'name_or_path' es un nombre (sin .yml/.yaml):
-          1) Busca 'name.yaml/.yml' en las carpetas conocidas (o PRESETS_DIR).
-          2) Si no existe, busca un archivo 'colección' (p.ej. 'presets.yaml')
-             que contenga una clave top-level 'name' y la devuelve.
-    Completa secciones mínimas y devuelve dict listo para runner/training.
+    Carga un preset.
+
+    Usos soportados:
+      1) load_preset("std")
+         - Busca 'std' en archivos individuales o en una colección (p.ej. presets.yaml).
+
+      2) load_preset("configs/presets.yaml", "std")
+         - Carga el YAML indicado y devuelve la subclave 'std' (o bajo 'presets.std').
+
+      3) load_preset(Path("configs/presets.yaml"), "std")
+         - Igual que (2), usando Path.
+
+      4) load_preset("configs/mi_preset_individual.yaml")
+         - Carga un YAML individual completo (sin subclave), como antes.
+
+    Devuelve un dict con secciones mínimas aseguradas y meta-información en _meta.
     """
     p = Path(str(name_or_path))
+
+    # --- Modo 2-parámetros: ruta YAML + clave ---
+    if preset_key is not None:
+        if p.suffix.lower() not in (".yaml", ".yml"):
+            raise ValueError(
+                "Cuando se pasa 'preset_key', el primer argumento debe ser una ruta a YAML "
+                f"(recibido: {p})"
+            )
+        # Resolver ruta relativa al CWD si fuera necesario
+        if not p.exists():
+            p2 = Path.cwd() / p
+            if p2.exists():
+                p = p2
+            else:
+                raise FileNotFoundError(f"No existe el archivo de preset: {p}")
+
+        data = _yaml_load(p)
+
+        # Buscar clave directa
+        if preset_key in data and isinstance(data[preset_key], dict):
+            subcfg = data[preset_key]
+        else:
+            # Buscar bajo 'presets'
+            presets = data.get("presets")
+            if isinstance(presets, dict) and preset_key in presets and isinstance(presets[preset_key], dict):
+                subcfg = presets[preset_key]
+            else:
+                raise KeyError(
+                    f"El YAML {p} no contiene la clave '{preset_key}' ni bajo 'presets'."
+                )
+
+        cfg = _ensure_sections(subcfg)
+        cfg.setdefault("_meta", {})
+        cfg["_meta"]["preset_path"] = str(p.resolve())
+        cfg["_meta"]["preset_key"] = str(preset_key)
+        return cfg
+
+    # --- Modo 1-parámetro (compatible con la versión actual) ---
     # 1) Si te pasan una ruta a YAML, úsala directamente
     if p.suffix.lower() in (".yaml", ".yml"):
         if not p.exists():
-            # prueba relativo a CWD
             p2 = Path.cwd() / p
             if p2.exists():
                 p = p2
@@ -157,7 +206,7 @@ def load_preset(name_or_path: Union[str, os.PathLike]) -> Dict[str, Any]:
         cfg["_meta"]["preset_path"] = str(p.resolve())
         return cfg
 
-    # 2) Si te pasan un nombre (fast/std/accurate) -> busca archivo individual
+    # 2) Nombre -> archivo individual
     found = _find_individual_preset_file(p.name)
     if found is not None:
         data = _yaml_load(found)
@@ -166,14 +215,14 @@ def load_preset(name_or_path: Union[str, os.PathLike]) -> Dict[str, Any]:
         cfg["_meta"]["preset_path"] = str(found.resolve())
         return cfg
 
-    # 3) Si no existe archivo individual, intenta colección (presets.yaml)
+    # 3) Nombre -> dentro de colección (presets.yaml)
     resolved = _resolve_from_collection(p.name)
     if resolved is not None:
         file, subcfg = resolved
         cfg = _ensure_sections(subcfg)
         cfg.setdefault("_meta", {})
         cfg["_meta"]["preset_path"] = str(file.resolve())
-        cfg["_meta"]["preset_key"]  = p.name
+        cfg["_meta"]["preset_key"] = p.name
         return cfg
 
     # 4) Nada encontrado
@@ -184,6 +233,11 @@ def load_preset(name_or_path: Union[str, os.PathLike]) -> Dict[str, Any]:
         f"- O crea 'configs/{p.name}.yaml' (o usa {_PRESETS_DIR_ENV})\n"
         f"- O pasa la ruta completa a un YAML."
     )
+
+def load_preset_from(path: Union[str, os.PathLike], key: str) -> Dict[str, Any]:
+    """Azúcar sintáctico retrocompatible: load_preset(path, key)."""
+    return load_preset(path, key)
+
 
 def dump_cfg(cfg: Dict[str, Any]) -> str:
     try:

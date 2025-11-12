@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.utils import load_preset, build_task_list_for, build_components_for
+from src.config import load_preset, build_task_list_for, build_components_for
 from src.runner import run_continual
 
 def main():

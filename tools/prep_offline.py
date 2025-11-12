@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.utils import load_preset
+from src.config import load_preset
 from src.prep.data_prep import PrepConfig, run_prep   # tu módulo existente
 from src.prep.augment_offline import balance_train_with_augmented_images
 from src.prep.encode_offline import encode_csv_to_h5

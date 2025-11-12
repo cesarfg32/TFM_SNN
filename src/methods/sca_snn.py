@@ -1,4 +1,3 @@
-# src/methods/sca_snn.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from torch.utils.data import DataLoader
 
 from .base import BaseMethod
 from src.nn_io import _forward_with_cached_orientation  # <<< clave: orientación consistente
+
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
@@ -313,9 +313,10 @@ class SCA_SNN(BaseMethod):
         yTBN = (yTBN * m).contiguous()
         yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0)
 
-        if self.cfg.verbose:
+        # --- LOG CONTROLADO POR logging.sca-snn.verbose / log_every ---
+        if bool(getattr(self, "verbose", self.cfg.verbose)):
             self._step += 1
-            every = max(10, int(self.cfg.log_every))
+            every = max(10, int(getattr(self, "log_every", self.cfg.log_every)))
             if (self._step % every) == 0:
                 try:
                     active = 100.0 * float(m.mean().item())
@@ -553,12 +554,14 @@ class SCA_SNN(BaseMethod):
         self._suspend_mask = False
         self._sim_min = self._estimate_similarity_min(anchors_curr)
 
-        print(f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
-              f"bins={self.cfg.num_bins} | sim_min={self._sim_min:.3f}")
-        if self.cfg.verbose:
-            print(f"[SCA] probe | N={self._N} | anchor_batches={self.cfg.anchor_batches} | "
-                  f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
-                  f"habit_decay={self.cfg.habit_decay}")
+        # --- LOG CONTROLADO POR logging.sca-snn.verbose ---
+        if bool(getattr(self, "verbose", self.cfg.verbose)):
+            print(f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
+                  f"bins={self.cfg.num_bins} | sim_min={self._sim_min:.3f}")
+            if True:  # mantener bloque y gating externo
+                print(f"[SCA] probe | N={self._N} | anchor_batches={self.cfg.anchor_batches} | "
+                      f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
+                      f"habit_decay={self.cfg.habit_decay}")
 
         # Activa el hook de gating
         if self._hook_handle is None:
@@ -583,12 +586,13 @@ class SCA_SNN(BaseMethod):
         self._suspend_mask = False
         self._anchors_prev.append(anchors.detach().clone())
 
-        if self._R is not None and self._N:
-            rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
-            act_frac = float((torch.sigmoid(self._R) > rho).float().mean().item())
-            print(f"[SCA] after_task: act≈{100.0*act_frac:.1f}% | rho={rho:.3f} | sim_min={self._sim_min:.3f}")
+        # --- LOG CONTROLADO POR logging.sca-snn.verbose ---
+        if bool(getattr(self, "verbose", self.cfg.verbose)):
+            if self._R is not None and self._N:
+                rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
+                act_frac = float((torch.sigmoid(self._R) > rho).float().mean().item())
+                print(f"[SCA] after_task: act≈{100.0*act_frac:.1f}% | rho={rho:.3f} | sim_min={self._sim_min:.3f}")
 
-        if self.cfg.verbose:
             used = None
             if self._R is not None:
                 thr = (self.cfg.beta - self._sim_min + self.cfg.bias)

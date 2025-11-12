@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # --- Proyecto -----------------------------------------------------------------
-from src.utils import load_preset
+from src.config import load_preset
 from src.models import build_model
 from src.datasets import ImageTransform, encode_rate as enc_rate, encode_latency as enc_latency
 

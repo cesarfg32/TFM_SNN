@@ -1,24 +1,21 @@
+# src/methods/ewc.py
 # -*- coding: utf-8 -*-
 """EWC (Elastic Weight Consolidation) para mitigar el olvido catastrófico."""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
-
 import torch
 from torch import nn
-
 from src.methods.base import BaseMethod
 from src.nn_io import _forward_with_cached_orientation, _align_target_shape
-
 
 @dataclass
 class EWCConfig:
     lambd: float = 0.0
     fisher_batches: int = 25
 
-
 class EWC:
-    """Implementación EWC con Fisher diagonal (modelo perezoso, se inyecta en before_task)."""
+    """Implementación EWC con Fisher diagonal (modelo perezoso; se inyecta antes de consolidar)."""
     name = "ewc"
 
     def __init__(
@@ -33,8 +30,7 @@ class EWC:
         self.cfg = cfg
         self.loss_fn = loss_fn or nn.MSELoss()
         self.device = (
-            device
-            if device is not None
+            device if device is not None
             else (torch.device("cuda", 0) if torch.cuda.is_available() else torch.device("cpu"))
         )
         self._mu: Dict[str, torch.Tensor] = {}
@@ -45,14 +41,17 @@ class EWC:
         return {n: p.detach().clone() for n, p in self.model.named_parameters() if p.requires_grad}
 
     def estimate_fisher(self, loader) -> int:
-        """Estima Fisher ≈ E[(∂L/∂θ)^2] usando batches del loader."""
+        """Estima Fisher ≈ E[(∂L/∂θ)^2] usando batches del loader (post-tarea)."""
         assert self.model is not None, "[EWC] model no inicializado"
         self.model.to(self.device)
         was_training = self.model.training
         self.model.eval()
 
-        fisher = {n: torch.zeros_like(p, device=p.device)
-                  for n, p in self.model.named_parameters() if p.requires_grad}
+        fisher = {
+            n: torch.zeros_like(p, device=p.device)
+            for n, p in self.model.named_parameters() if p.requires_grad
+        }
+        # θ* de la tarea que ACABA de terminar
         self._mu = self._snapshot_params()
 
         n_batches = 0
@@ -62,9 +61,11 @@ class EWC:
         with torch.enable_grad():
             for x, y in loader:
                 y = y.to(self.device, non_blocking=True)
+                # forward consistente con train/val; AMP ON para memoria
                 y_hat = _forward_with_cached_orientation(
                     self.model, x, y, self.device, use_amp=True, phase_hint=hint, phase="fisher"
                 )
+                # loss en FP32 y mean() → invariante a batch size
                 y_aligned = _align_target_shape(y_hat, y).to(
                     device=y_hat.device, dtype=y_hat.dtype, non_blocking=True
                 )
@@ -99,9 +100,8 @@ class EWC:
                 reg = reg + (self._fisher[n] * (p - self._mu[n]).pow(2)).sum()
         return float(self.cfg.lambd) * reg
 
-
 class EWCMethod(BaseMethod):
-    """Método EWC homogéneo al resto: no requiere model en __init__, device/loss_fn se pasan aquí."""
+    """Wrapper homogéneo: recibe device/loss_fn aquí; consolida en after_task."""
     name = "ewc"
 
     def __init__(
@@ -120,14 +120,16 @@ class EWCMethod(BaseMethod):
             device=self.device,
         )
         self.name = f"ewc_lam_{lambd:.0e}"
+        # Flags inyectables desde cfg['logging']['ewc']
         self.inner_verbose = getattr(self, "inner_verbose", False)
         self.inner_every = getattr(self, "inner_every", 50)
+        # fisher_verbose se inyecta dinámicamente
 
     def penalty(self) -> torch.Tensor:
         return self.impl.penalty()
 
     def before_task(self, model: nn.Module, train_loader, val_loader) -> None:
-        # Inyecta el modelo y (si procede) alinea el device con el del modelo
+        # Sólo alinea model/device; NO consolidar aquí
         self.impl.model = model
         try:
             dev_model = next(model.parameters()).device
@@ -136,19 +138,19 @@ class EWCMethod(BaseMethod):
         except StopIteration:
             pass
 
-        used = self.impl.estimate_fisher(train_loader)
-        try:
-            if self.impl._fisher:
-                abs_sum = float(sum(f.abs().sum().item() for f in self.impl._fisher.values()))
-                abs_max = float(max(f.abs().max().item() for f in self.impl._fisher.values()))
-                print(f"[EWC] Fisher listo: batches_usados={used} | sum={abs_sum:.3e} | max={abs_max:.3e}")
-            else:
-                print(f"[EWC] Fisher listo: batches_usados={used} | (vacío)")
-        except Exception:
-            pass
-
     def after_task(self, model: nn.Module, train_loader, val_loader) -> None:
-        pass
+        # Consolidación post-entrenamiento (como en master antiguo / paper)
+        used = self.impl.estimate_fisher(train_loader)
+        if bool(getattr(self, "fisher_verbose", False)):
+            try:
+                if self.impl._fisher:
+                    abs_sum = float(sum(f.abs().sum().item() for f in self.impl._fisher.values()))
+                    abs_max = float(max(f.abs().max().item() for f in self.impl._fisher.values()))
+                    print(f"[EWC] Fisher listo: batches_usados={used} | sum={abs_sum:.3e} | max={abs_max:.3e}")
+                else:
+                    print(f"[EWC] Fisher listo: batches_usados={used} | (vacío)")
+            except Exception:
+                pass
 
     def tunable(self) -> dict:
         try:

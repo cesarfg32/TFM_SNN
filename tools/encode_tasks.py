@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.utils import load_preset
+from src.config import load_preset
 from src.prep.encode_offline import encode_csv_to_h5
 
 def main():

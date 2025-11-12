@@ -94,23 +94,25 @@ defaults: &defaults
       country_iso_code: "ESP"
       measure_power_secs: 15
       log_level: "error"
+
+    # Puedes usar estas dos claves universales por método (gracias al alias):
     ewc:
-      fisher_verbose: true
-      inner_verbose:  true
-      inner_every:    8192
+      fisher_verbose: false
+      verbose: false
+      every: 256   # si activas verbose, imprimirá cada 256 iters
     rehearsal:
       buffer_verbose: false
       replay_verbose: false
       replay_show_shapes: false
     as-snn:
-      activity_verbose: false
-      activity_every: 8192
+      verbose: false
+      every: 256
     sa-snn:
-      trace_verbose: false
-      trace_every: 8192
+      verbose: false
+      every: 256
     sca-snn:
       verbose: false
-      log_every: 8192
+      every: 256
 
   naming: &defaults_naming
     tag: ""
@@ -137,6 +139,31 @@ fast:
     <<: *defaults_prep
   logging:
     <<: *defaults_logging
+    telemetry:
+      codecarbon: true
+      offline: true
+      country_iso_code: "ESP"
+      measure_power_secs: 15
+      log_level: "error"
+
+    # Puedes usar estas dos claves universales por método (gracias al alias):
+    ewc:
+      fisher_verbose: true
+      verbose: true
+      every: 256   # si activas verbose, imprimirá cada 256 iters
+    rehearsal:
+      buffer_verbose: true
+      replay_verbose: true
+      replay_show_shapes: false
+    as-snn:
+      verbose: true
+      every: 256
+    sa-snn:
+      verbose: true
+      every: 256
+    sca-snn:
+      verbose: true
+      every: 256
   naming:
     <<: *defaults_naming
 

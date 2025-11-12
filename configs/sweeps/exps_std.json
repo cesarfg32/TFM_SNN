@@ -1,71 +1,62 @@
 [
   {
-    "method": "sca-snn",
-    "params": {
-      "attach_to": "f6",
-      "flatten_spatial": false,
-      "num_bins": 50,
-      "anchor_batches": 8,
-      "beta": 0.55,
-      "bias": 0.0,
-      "soft_mask_temp": 0.30,
-      "verbose": false,
-      "log_every": 65536
-    },
-    "tag": "std_sca_b50_b055_t030_ab8_f0"
+    "method": "ewc",
+    "params": { "lambd": 3000000.0, "fisher_batches": 500 },
+    "tag": "std_ewc_l3e6_fb500_v1"
   },
+
   {
-    "method": "sca-snn",
-    "params": {
-      "attach_to": "f6",
-      "flatten_spatial": false,
-      "num_bins": 50,
-      "anchor_batches": 16,
-      "beta": 0.50,
-      "bias": 0.0,
-      "soft_mask_temp": 0.50,
-      "verbose": false,
-      "log_every": 65536
-    },
-    "tag": "std_sca_b50_b050_t050_ab16_f0"
+    "method": "rehearsal",
+    "params": { "buffer_size": 5000, "replay_ratio": 0.15 },
+    "tag": "std_reh_b5k_rr015_v1"
   },
+
+  {
+    "method": "as-snn",
+    "params": {
+      "gamma_ratio": 0.45, "lambda_a": 2.0, "ema": 0.90,
+      "attach_to": "f6", "measure_at": "modules",
+      "penalty_mode": "l1",
+      "do_synaptic_scaling": true, "scale_clip": [0.5, 2.0], "scale_bias": false
+    },
+    "tag": "std_as_f6_gr045_lam2p0_scaling_v1"
+  },
+
   {
     "method": "sa-snn",
     "params": {
       "attach_to": "f6",
-      "k": 8,
-      "tau": 32.0,
-      "th_min": 1.0,
-      "th_max": 2.0,
+      "k": 6, "tau": 32.0, "vt_scale": 1.35,
+      "th_min": 1.0, "th_max": 2.0,
       "p": 2000000,
-      "vt_scale": 1.20,
-      "flatten_spatial": false,
-      "assume_binary_spikes": false,
-      "reset_counters_each_task": false
-    },
-    "tag": "std_sa_k8_tau32_vt1p20_p2m_reset0"
-  },
-  {
-    "method": "sa-snn",
-    "params": {
-      "attach_to": "f6",
-      "k": 8,
-      "tau": 32.0,
-      "th_min": 1.0,
-      "th_max": 2.0,
-      "p": 2000000,
-      "vt_scale": 1.28,
       "flatten_spatial": false,
       "assume_binary_spikes": false,
       "reset_counters_each_task": true
     },
-    "tag": "std_sa_k8_tau32_vt1p28_p2m_reset1"
+    "tag": "std_sa_f6_k6_tau32_vt1p35_reset1_v1"
   },
+
   {
-    "method": "ewc",
+    "method": "sca-snn",
     "params": {
-      "lambd": 1000000.0
+      "attach_to": "f6",
+      "flatten_spatial": false,
+      "num_bins": 50, "anchor_batches": 24,
+      "beta": 0.50, "bias": 0.0, "soft_mask_temp": 0.40,
+      "verbose": false, "log_every": 65536
     },
-    "tag": "std_ewc_lam_1e6"
+    "tag": "std_sca_f6_b50_b050_t040_ab24_f0_v1"
+  },
+
+  {
+    "method": "sca-snn",
+    "params": {
+      "attach_to": "f6",
+      "flatten_spatial": true,
+      "num_bins": 50, "anchor_batches": 32,
+      "beta": 0.45, "bias": 0.0, "soft_mask_temp": 0.50,
+      "verbose": false, "log_every": 65536
+    },
+    "tag": "std_sca_f6_b50_b045_t050_ab32_f1_v1"
   }
 ]
