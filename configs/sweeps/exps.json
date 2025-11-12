@@ -1,0 +1,189 @@
+{
+  "experiments": [
+
+    { "tag": "fast_ewc_l5e7_fb300",  "preset": "fast", "seed": 42, "amp": true,
+      "method": "ewc",
+      "method_kwargs": { "lambd": 5e7, "fisher_batches": 300 }
+    },
+    { "tag": "fast_ewc_l3e8_fb300",  "preset": "fast", "seed": 42, "amp": true,
+      "method": "ewc",
+      "method_kwargs": { "lambd": 3e8, "fisher_batches": 300 }
+    },
+    { "tag": "fast_ewc_l1e9_fb300",  "preset": "fast", "seed": 42, "amp": true,
+      "method": "ewc",
+      "method_kwargs": { "lambd": 1e9, "fisher_batches": 300 }
+    },
+
+    {
+      "tag": "fast_ewc_l6e7__sca_f6_b50_beta050_bias0_t050_ab12",
+      "preset": "fast", "seed": 42, "amp": true,
+      "method": "sca-snn+ewc",
+      "method_kwargs": {
+        "lambd": 6e7, "fisher_batches": 300,
+        "attach_to": "f6",
+        "flatten_spatial": false,
+        "num_bins": 50, "anchor_batches": 12,
+        "beta": 0.50, "bias": 0.0, "soft_mask_temp": 0.50,
+        "habit_decay": 0.99,
+        "verbose": false, "log_every": 65536
+      }
+    },
+
+    {
+      "tag": "fast_sa_f6_k0p12_tau24_vt1p15_reset1",
+      "preset": "fast", "seed": 42, "amp": true,
+      "method": "sa-snn",
+      "method_kwargs": {
+        "attach_to": "f6",
+        "k": 0.12, "tau": 24.0, "vt_scale": 1.15,
+        "th_min": 1.0, "th_max": 2.0,
+        "p": 2000000,
+        "flatten_spatial": false,
+        "assume_binary_spikes": false,
+        "reset_counters_each_task": true,
+        "update_on_eval": false
+      }
+    },
+    {
+      "tag": "fast_sa_f6_k0p15_tau28_vt1p15_reset1",
+      "preset": "fast", "seed": 42, "amp": true,
+      "method": "sa-snn",
+      "method_kwargs": {
+        "attach_to": "f6",
+        "k": 0.15, "tau": 28.0, "vt_scale": 1.15,
+        "th_min": 1.0, "th_max": 2.0,
+        "p": 2000000,
+        "flatten_spatial": false,
+        "assume_binary_spikes": false,
+        "reset_counters_each_task": true,
+        "update_on_eval": false
+      }
+    },
+
+    {
+      "tag": "fast_as_input_gr055_lam0p15_no_scaling",
+      "preset": "fast", "seed": 42, "amp": true,
+      "method": "as-snn",
+      "method_kwargs": {
+        "gamma_ratio": 0.55, "lambda_a": 0.15, "ema": 0.90,
+        "measure_at": "input",
+        "penalty_mode": "l1",
+        "do_synaptic_scaling": false,
+        "activity_verbose": false, "activity_every": 400
+      }
+    },
+    {
+      "tag": "fast_as_input_gr050_lam0p20_scaling_on",
+      "preset": "fast", "seed": 42, "amp": true,
+      "method": "as-snn",
+      "method_kwargs": {
+        "gamma_ratio": 0.50, "lambda_a": 0.20, "ema": 0.90,
+        "measure_at": "input",
+        "penalty_mode": "l1",
+        "do_synaptic_scaling": true,
+        "activity_verbose": false, "activity_every": 400
+      }
+    },
+    {
+      "tag": "fast_as_input_gr055_lam0p25_scaling_on",
+      "preset": "fast", "seed": 42, "amp": true,
+      "method": "as-snn",
+      "method_kwargs": {
+        "gamma_ratio": 0.55, "lambda_a": 0.25, "ema": 0.90,
+        "measure_at": "input",
+        "penalty_mode": "l1",
+        "do_synaptic_scaling": true,
+        "activity_verbose": false, "activity_every": 400
+      }
+    },
+
+    {
+      "tag": "std_sca_f6_b50_beta050_bias0_t050_ab24",
+      "preset": "std", "seed": 42, "amp": true,
+      "method": "sca-snn",
+      "method_kwargs": {
+        "attach_to": "f6",
+        "flatten_spatial": false,
+        "num_bins": 50, "anchor_batches": 24,
+        "beta": 0.50, "bias": 0.0, "soft_mask_temp": 0.50,
+        "habit_decay": 0.99,
+        "verbose": false, "log_every": 65536
+      }
+    },
+    {
+      "tag": "std_sca_f6_b50_beta045_bias-005_t045_ab24",
+      "preset": "std", "seed": 42, "amp": true,
+      "method": "sca-snn",
+      "method_kwargs": {
+        "attach_to": "f6",
+        "flatten_spatial": false,
+        "num_bins": 50, "anchor_batches": 24,
+        "beta": 0.45, "bias": -0.05, "soft_mask_temp": 0.45,
+        "habit_decay": 0.99,
+        "verbose": false, "log_every": 65536
+      }
+    },
+
+    { "tag": "std_reh_b3k_rr033", "preset": "std", "seed": 42, "amp": true,
+      "method": "rehearsal",
+      "method_kwargs": { "buffer_size": 3000, "replay_ratio": 0.33 }
+    },
+    { "tag": "std_reh_b5k_rr025", "preset": "std", "seed": 42, "amp": true,
+      "method": "rehearsal",
+      "method_kwargs": { "buffer_size": 5000, "replay_ratio": 0.25 }
+    },
+
+    { "tag": "std_ewc_l6e7_fb400", "preset": "std", "seed": 42, "amp": true,
+      "method": "ewc",
+      "method_kwargs": { "lambd": 6e7, "fisher_batches": 400 }
+    },
+    { "tag": "std_ewc_l3e8_fb400", "preset": "std", "seed": 42, "amp": true,
+      "method": "ewc",
+      "method_kwargs": { "lambd": 3e8, "fisher_batches": 400 }
+    },
+
+    {
+      "tag": "std_ewc_l6e7__sca_f6_b50_beta050_bias0_t050_ab24",
+      "preset": "std", "seed": 42, "amp": true,
+      "method": "sca-snn+ewc",
+      "method_kwargs": {
+        "lambd": 6e7, "fisher_batches": 400,
+        "attach_to": "f6",
+        "flatten_spatial": false,
+        "num_bins": 50, "anchor_batches": 24,
+        "beta": 0.50, "bias": 0.0, "soft_mask_temp": 0.50,
+        "habit_decay": 0.99,
+        "verbose": false, "log_every": 65536
+      }
+    },
+
+    {
+      "tag": "std_sa_f6_k0p15_tau24_vt1p15_reset1",
+      "preset": "std", "seed": 42, "amp": true,
+      "method": "sa-snn",
+      "method_kwargs": {
+        "attach_to": "f6",
+        "k": 0.15, "tau": 24.0, "vt_scale": 1.15,
+        "th_min": 1.0, "th_max": 2.0,
+        "p": 2000000,
+        "flatten_spatial": false,
+        "assume_binary_spikes": false,
+        "reset_counters_each_task": true,
+        "update_on_eval": false
+      }
+    },
+
+    {
+      "tag": "std_as_input_gr055_lam0p20_scaling_on",
+      "preset": "std", "seed": 42, "amp": true,
+      "method": "as-snn",
+      "method_kwargs": {
+        "gamma_ratio": 0.55, "lambda_a": 0.20, "ema": 0.90,
+        "measure_at": "input",
+        "penalty_mode": "l1",
+        "do_synaptic_scaling": true,
+        "activity_verbose": false, "activity_every": 400
+      }
+    }
+  ]
+}

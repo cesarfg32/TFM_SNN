@@ -180,13 +180,37 @@ std:
     batch_size: 256
     es_patience: null
     es_min_delta: null
-    compile: false
   continual:
     <<: *defaults_continual
   prep:
     <<: *defaults_prep
   logging:
     <<: *defaults_logging
+    telemetry:
+      codecarbon: true
+      offline: true
+      country_iso_code: "ESP"
+      measure_power_secs: 15
+      log_level: "error"
+
+    # Puedes usar estas dos claves universales por método (gracias al alias):
+    ewc:
+      fisher_verbose: true
+      verbose: true
+      every: 256   # si activas verbose, imprimirá cada 256 iters
+    rehearsal:
+      buffer_verbose: true
+      replay_verbose: true
+      replay_show_shapes: false
+    as-snn:
+      verbose: true
+      every: 256
+    sa-snn:
+      verbose: true
+      every: 256
+    sca-snn:
+      verbose: true
+      every: 256
   naming:
     <<: *defaults_naming
 
