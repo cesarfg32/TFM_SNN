@@ -1,4 +1,3 @@
-# src/training.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -25,9 +24,11 @@ __all__ = [
     "_forward_with_cached_orientation",
 ]
 
+# Rendimiento numérico en Ada: TF32 ON
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
+
 
 @dataclass
 class TrainConfig:
@@ -38,6 +39,7 @@ class TrainConfig:
     seed: Optional[int] = None
     es_patience: Optional[int] = None
     es_min_delta: float = 0.0
+
 
 def train_supervised(
     model: nn.Module,
@@ -61,12 +63,18 @@ def train_supervised(
     model = model.to(device)
 
     use_amp = bool(cfg.amp and torch.cuda.is_available())
+    # <<< CAMBIO CLAVE: elegimos dtype de autocast (BF16 si está soportado) >>>
+    dtype_autocast = (
+        torch.bfloat16
+        if (use_amp and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+        else torch.float16
+    )
+
     opt = optim.Adam(model.parameters(), lr=cfg.lr)
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler(enabled=use_amp)  # con BF16 no es necesario, pero es inocuo
 
     history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_mse": []}
     t0 = time.time()
-
     best_val = float("inf")
     patience_left = cfg.es_patience if (cfg.es_patience is not None and cfg.es_patience > 0) else None
     best_state = None
@@ -74,10 +82,22 @@ def train_supervised(
     LOG_ITPS = os.environ.get("TRAIN_LOG_ITPS", "0") == "1"
     phase_hint: Dict[str, str] = {"train": None, "val": None}
 
+    # Permite que el método envuelva el loader si lo necesita (p.ej., Rehearsal)
+    if method is not None and hasattr(method, "prepare_train_loader"):
+        try:
+            maybe_loader = method.prepare_train_loader(train_loader)
+            if maybe_loader is not None:
+                train_loader = maybe_loader
+        except Exception:
+            # Caída blanda: si algo falla aquí, sigue con el loader original
+            pass
+
     for epoch in range(1, cfg.epochs + 1):
         if method is not None and hasattr(method, "before_epoch"):
-            try: method.before_epoch(model, epoch)
-            except Exception: pass
+            try:
+                method.before_epoch(model, epoch)
+            except Exception:
+                pass
 
         model.train()
         running = 0.0
@@ -85,27 +105,32 @@ def train_supervised(
         t_epoch0 = time.perf_counter()
 
         for x, y in tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.epochs}", leave=False):
+            # Mueve y a device (x lo mueve _forward_* si es necesario)
             y = y.to(device, non_blocking=True)
 
-            y_hat = _forward_with_cached_orientation(
-                model=model, x=x, y=y, device=device, use_amp=use_amp, phase_hint=phase_hint, phase="train"
-            )
-            # Alinea target y garantiza mismo dtype que y_hat (evita mezclas fp16/fp32)
-            y_aligned = _align_target_shape(y_hat, y).to(device=y_hat.device, dtype=y_hat.dtype, non_blocking=True)
-
-            with autocast("cuda", enabled=use_amp):
+            # <<< CAMBIO CLAVE: autocast (BF16 si disponible) cubre forward+loss; desactivamos AMP interno >>>
+            with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
+                y_hat = _forward_with_cached_orientation(
+                    model=model, x=x, y=y, device=device,
+                    use_amp=False,  # << evitamos doble autocast; usamos el nuestro
+                    phase_hint=phase_hint, phase="train"
+                )
+                # Alinea target y garantiza mismo dtype que y_hat
+                y_aligned = _align_target_shape(y_hat, y).to(
+                    device=y_hat.device, dtype=y_hat.dtype, non_blocking=True
+                )
                 loss_base = loss_fn(y_hat, y_aligned)
 
-            # Regularización del método (EWC, etc.) al mismo dtype que y_hat
-            pen = 0.0
-            if method is not None:
-                p = method.penalty()
-                if isinstance(p, torch.Tensor):
-                    pen = p.to(device=y_hat.device, dtype=y_hat.dtype)
-                else:
-                    pen = torch.tensor(float(p), device=y_hat.device, dtype=y_hat.dtype)
+                # Regularización del método (EWC, etc.) al mismo dtype que y_hat
+                pen = 0.0
+                if method is not None:
+                    p = method.penalty()
+                    if isinstance(p, torch.Tensor):
+                        pen = p.to(device=y_hat.device, dtype=y_hat.dtype)
+                    else:
+                        pen = torch.tensor(float(p), device=y_hat.device, dtype=y_hat.dtype)
 
-            loss = loss_base + pen
+                loss = loss_base + pen
 
             # Logging neutral opcional
             log_inner = bool(getattr(method, "inner_verbose", False))
@@ -132,8 +157,10 @@ def train_supervised(
                 print(f"[{meth}] base={base_val:.4g} | pen={pen_val:.4g} | pen/base={ratio:.3f}{suggest_msg}")
 
             if method is not None and hasattr(method, "before_batch"):
-                try: method.before_batch(model, (x, y))
-                except Exception: pass
+                try:
+                    method.before_batch(model, (x, y))
+                except Exception:
+                    pass
 
             opt.zero_grad(set_to_none=True)
             if use_amp:
@@ -150,8 +177,10 @@ def train_supervised(
             running += float(loss.detach().item())
 
             if method is not None and hasattr(method, "after_batch"):
-                try: method.after_batch(model, (x, y), loss)
-                except Exception: pass
+                try:
+                    method.after_batch(model, (x, y), loss)
+                except Exception:
+                    pass
 
             it_count += 1
 
@@ -172,12 +201,17 @@ def train_supervised(
         with torch.no_grad():
             for x, y in val_loader:
                 y = y.to(device, non_blocking=True)
-                y_hat = _forward_with_cached_orientation(
-                    model=model, x=x, y=y, device=device, use_amp=use_amp, phase_hint=phase_hint, phase="val"
-                )
-                y_aligned = _align_target_shape(y_hat, y).to(device=y_hat.device, dtype=y_hat.dtype, non_blocking=True)
-                with autocast("cuda", enabled=use_amp):
+                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):  # <<< idem BF16
+                    y_hat = _forward_with_cached_orientation(
+                        model=model, x=x, y=y, device=device,
+                        use_amp=False,  # << evitamos doble autocast en val
+                        phase_hint=phase_hint, phase="val"
+                    )
+                    y_aligned = _align_target_shape(y_hat, y).to(
+                        device=y_hat.device, dtype=y_hat.dtype, non_blocking=True
+                    )
                     v_loss = loss_fn(y_hat, y_aligned)
+
                 v_running_mse += float(v_loss.detach().item())
                 mae_batch = torch.abs(y_hat.to(torch.float32) - y_aligned.to(torch.float32)).mean()
                 v_running_mae += float(mae_batch.detach().item())
@@ -192,8 +226,10 @@ def train_supervised(
         history["val_mse"].append(val_loss)
 
         if method is not None and hasattr(method, "after_epoch"):
-            try: method.after_epoch(model, epoch)
-            except Exception: pass
+            try:
+                method.after_epoch(model, epoch)
+            except Exception:
+                pass
 
         torch.save(model.state_dict(), last_ckpt)
 

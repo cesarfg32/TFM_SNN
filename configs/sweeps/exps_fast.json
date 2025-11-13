@@ -1,76 +1,9 @@
 [
+  { "tag": "fast_reh_b3k_rr030", "preset": "fast", "seed": 42, "amp": true,
+    "method": "rehearsal",
+    "method_kwargs": { "buffer_size": 3000, "replay_ratio": 0.30 } },
 
-  { "method": "ewc", "params": { "lambd": 5e7,  "fisher_batches": 300 }, "tag": "fast_ewc_l5e7_fb300" },
-  { "method": "ewc", "params": { "lambd": 3e8,  "fisher_batches": 300 }, "tag": "fast_ewc_l3e8_fb300" },
-  { "method": "ewc", "params": { "lambd": 1e9,  "fisher_batches": 300 }, "tag": "fast_ewc_l1e9_fb300" },
-
-  {
-    "method": "sca-snn+ewc",
-    "params": {
-      "lambd": 6e7, "fisher_batches": 300,
-      "attach_to": "f6", "flatten_spatial": false,
-      "num_bins": 50, "anchor_batches": 12,
-      "beta": 0.50, "bias": 0.0, "soft_mask_temp": 0.50,
-      "verbose": false, "log_every": 65536
-    },
-    "tag": "fast_ewc_l6e7__sca_f6_b50_beta050_bias0_t050_ab12"
-  },
-
-  {
-    "method": "sa-snn",
-    "params": {
-      "attach_to": "f6",
-      "k": 0.12, "tau": 24.0, "vt_scale": 1.15,
-      "th_min": 1.0, "th_max": 2.0,
-      "p": 2000000,
-      "flatten_spatial": false,
-      "assume_binary_spikes": false,
-      "reset_counters_each_task": true
-    },
-    "tag": "fast_sa_f6_k0p12_tau24_vt1p15_reset1"
-  },
-  {
-    "method": "sa-snn",
-    "params": {
-      "attach_to": "f6",
-      "k": 0.15, "tau": 28.0, "vt_scale": 1.15,
-      "th_min": 1.0, "th_max": 2.0,
-      "p": 2000000,
-      "flatten_spatial": false,
-      "assume_binary_spikes": false,
-      "reset_counters_each_task": true
-    },
-    "tag": "fast_sa_f6_k0p15_tau28_vt1p15_reset1"
-  },
-
-  {
-    "method": "as-snn",
-    "params": {
-      "gamma_ratio": 0.55, "lambda_a": 0.15, "ema": 0.90,
-      "measure_at": "input",
-      "penalty_mode": "l1",
-      "do_synaptic_scaling": false
-    },
-    "tag": "fast_as_input_gr055_lam0p15_no_scaling"
-  },
-  {
-    "method": "as-snn",
-    "params": {
-      "gamma_ratio": 0.50, "lambda_a": 0.20, "ema": 0.90,
-      "measure_at": "input",
-      "penalty_mode": "l1",
-      "do_synaptic_scaling": true
-    },
-    "tag": "fast_as_input_gr050_lam0p20_scaling_on"
-  },
-  {
-    "method": "as-snn",
-    "params": {
-      "gamma_ratio": 0.55, "lambda_a": 0.25, "ema": 0.90,
-      "measure_at": "input",
-      "penalty_mode": "l1",
-      "do_synaptic_scaling": true
-    },
-    "tag": "fast_as_input_gr055_lam0p25_scaling_on"
-  }
+  { "tag": "fast_reh_b4k_rr025", "preset": "fast", "seed": 42, "amp": true,
+    "method": "rehearsal",
+    "method_kwargs": { "buffer_size": 4000, "replay_ratio": 0.25 } }
 ]

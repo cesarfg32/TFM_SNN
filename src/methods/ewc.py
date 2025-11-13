@@ -1,4 +1,3 @@
-# src/methods/ewc.py
 # -*- coding: utf-8 -*-
 """EWC (Elastic Weight Consolidation) para mitigar el olvido catastrófico."""
 from __future__ import annotations
@@ -9,10 +8,12 @@ from torch import nn
 from src.methods.base import BaseMethod
 from src.nn_io import _forward_with_cached_orientation, _align_target_shape
 
+
 @dataclass
 class EWCConfig:
     lambd: float = 0.0
     fisher_batches: int = 25
+
 
 class EWC:
     """Implementación EWC con Fisher diagonal (modelo perezoso; se inyecta antes de consolidar)."""
@@ -41,7 +42,10 @@ class EWC:
         return {n: p.detach().clone() for n, p in self.model.named_parameters() if p.requires_grad}
 
     def estimate_fisher(self, loader) -> int:
-        """Estima Fisher ≈ E[(∂L/∂θ)^2] usando batches del loader (post-tarea)."""
+        """
+        Estima Fisher ≈ E[(∂L/∂θ)^2] usando batches del loader (post-tarea).
+        NOTA: forward SIN AMP para estabilidad FP32 (alineado con derivación clásica).
+        """
         assert self.model is not None, "[EWC] model no inicializado"
         self.model.to(self.device)
         was_training = self.model.training
@@ -58,18 +62,19 @@ class EWC:
         cap = int(self.cfg.fisher_batches)
         hint = {"fisher": None}
 
+        # Hacemos el forward sin AMP explícitamente (use_amp=False)
         with torch.enable_grad():
             for x, y in loader:
                 y = y.to(self.device, non_blocking=True)
-                # forward consistente con train/val; AMP ON para memoria
                 y_hat = _forward_with_cached_orientation(
-                    self.model, x, y, self.device, use_amp=True, phase_hint=hint, phase="fisher"
+                    self.model, x, y, self.device, use_amp=False,  # <<<< clave: FP32 estable
+                    phase_hint=hint, phase="fisher"
                 )
                 # loss en FP32 y mean() → invariante a batch size
                 y_aligned = _align_target_shape(y_hat, y).to(
-                    device=y_hat.device, dtype=y_hat.dtype, non_blocking=True
+                    device=y_hat.device, dtype=torch.float32, non_blocking=True
                 )
-                loss = self.loss_fn(y_hat.to(torch.float32), y_aligned.to(torch.float32)).mean()
+                loss = self.loss_fn(y_hat.to(torch.float32), y_aligned).mean()
 
                 self.model.zero_grad(set_to_none=True)
                 loss.backward()
@@ -99,6 +104,7 @@ class EWC:
             if p.requires_grad and n in self._fisher:
                 reg = reg + (self._fisher[n] * (p - self._mu[n]).pow(2)).sum()
         return float(self.cfg.lambd) * reg
+
 
 class EWCMethod(BaseMethod):
     """Wrapper homogéneo: recibe device/loss_fn aquí; consolida en after_task."""

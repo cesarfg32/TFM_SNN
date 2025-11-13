@@ -124,15 +124,6 @@
       }
     },
 
-    { "tag": "std_reh_b3k_rr033", "preset": "std", "seed": 42, "amp": true,
-      "method": "rehearsal",
-      "method_kwargs": { "buffer_size": 3000, "replay_ratio": 0.33 }
-    },
-    { "tag": "std_reh_b5k_rr025", "preset": "std", "seed": 42, "amp": true,
-      "method": "rehearsal",
-      "method_kwargs": { "buffer_size": 5000, "replay_ratio": 0.25 }
-    },
-
     { "tag": "std_ewc_l6e7_fb400", "preset": "std", "seed": 42, "amp": true,
       "method": "ewc",
       "method_kwargs": { "lambd": 6e7, "fisher_batches": 400 }
@@ -184,6 +175,17 @@
         "do_synaptic_scaling": true,
         "activity_verbose": false, "activity_every": 400
       }
+    },
+
+    { "tag": "std_reh_b0500_rr025_u8", "preset": "std", "seed": 42, "amp": true,
+      "method": "rehearsal",
+      "method_kwargs": { "buffer_size": 500, "replay_ratio": 0.25, "compress_mode": "auto", "pin_memory": true }
+    },
+
+    { "tag": "std_reh_b1250_rr033_u8", "preset": "std", "seed": 42, "amp": true,
+      "method": "rehearsal",
+      "method_kwargs": { "buffer_size": 1250, "replay_ratio": 0.33, "compress_mode": "auto", "pin_memory": true }
     }
+
   ]
 }
