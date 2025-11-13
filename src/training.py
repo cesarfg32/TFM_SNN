@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import json, time, os
+import json
+import time
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict
@@ -71,7 +73,7 @@ def train_supervised(
     )
 
     opt = optim.Adam(model.parameters(), lr=cfg.lr)
-    scaler = GradScaler(enabled=use_amp)  # con BF16 no es necesario, pero es inocuo
+    scaler = GradScaler(enabled=use_amp) # con BF16 no es necesario, pero es inocuo
 
     history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_mse": []}
     t0 = time.time()
@@ -112,7 +114,7 @@ def train_supervised(
             with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
                 y_hat = _forward_with_cached_orientation(
                     model=model, x=x, y=y, device=device,
-                    use_amp=False,  # << evitamos doble autocast; usamos el nuestro
+                    use_amp=False, # << evitamos doble autocast; usamos el nuestro
                     phase_hint=phase_hint, phase="train"
                 )
                 # Alinea target y garantiza mismo dtype que y_hat
@@ -137,7 +139,7 @@ def train_supervised(
             log_every = int(getattr(method, "inner_every", 50))
             if method is not None and log_inner and (it_count % max(1, log_every) == 0):
                 base_val = float(loss_base.detach().item())
-                pen_val  = float(pen.detach().item() if isinstance(pen, torch.Tensor) else float(pen))
+                pen_val = float(pen.detach().item() if isinstance(pen, torch.Tensor) else float(pen))
                 ratio = pen_val / max(1e-8, base_val)
                 suggest_msg = ""
                 tun = getattr(method, "tunable", None)
@@ -189,7 +191,7 @@ def train_supervised(
         dt = time.perf_counter() - t_epoch0
         if LOG_ITPS and dt > 0:
             ips = it_count / dt
-            print(f"[TRAIN it/s] epoch {epoch}/{cfg.epochs}: {ips:.1f} it/s  ({it_count} iters en {dt:.2f}s)")
+            print(f"[TRAIN it/s] epoch {epoch}/{cfg.epochs}: {ips:.1f} it/s ({it_count} iters en {dt:.2f}s)")
 
         train_loss = running / max(1, len(train_loader))
 
@@ -201,10 +203,10 @@ def train_supervised(
         with torch.no_grad():
             for x, y in val_loader:
                 y = y.to(device, non_blocking=True)
-                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):  # <<< idem BF16
+                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast): # <<< idem BF16
                     y_hat = _forward_with_cached_orientation(
                         model=model, x=x, y=y, device=device,
-                        use_amp=False,  # << evitamos doble autocast en val
+                        use_amp=False, # << evitamos doble autocast en val
                         phase_hint=phase_hint, phase="val"
                     )
                     y_aligned = _align_target_shape(y_hat, y).to(
@@ -218,7 +220,7 @@ def train_supervised(
                 n_val_batches += 1
 
         val_loss = v_running_mse / max(1, n_val_batches)
-        val_mae  = v_running_mae / max(1, n_val_batches)
+        val_mae = v_running_mae / max(1, n_val_batches)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)

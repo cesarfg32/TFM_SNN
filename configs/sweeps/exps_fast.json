@@ -18,7 +18,7 @@
                        "flatten_spatial": false, "assume_binary_spikes": false,
                        "reset_counters_each_task": true, "update_on_eval": false } },
 
-  { "tag": "fast3_sca_b80_bias012_t012_ab12_f1_f6", "preset": "fast", "seed": 42, "amp": true,
+  { "tag": "fast3_sca_b80_bias012_t012_ab12_f6", "preset": "fast", "seed": 42, "amp": true,
     "method": "sca-snn",
     "method_kwargs": { "attach_to": "f6", "flatten_spatial": true,
                        "num_bins": 32, "anchor_batches": 12,

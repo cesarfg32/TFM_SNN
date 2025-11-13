@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Union, List
 
@@ -89,6 +90,7 @@ class SASNN(BaseMethod):
             out = out.view(B, 1)
         B, C = out.shape[:2]
         spatial = out.shape[2:]
+
         if self.cfg.flatten_spatial:
             HW = int(torch.prod(torch.tensor(spatial)).item()) if spatial else 1
             N = max(1, C * HW)
@@ -108,8 +110,10 @@ class SASNN(BaseMethod):
                 tr_next = self._tr - (self._tr / self._tau) + S
                 tr_next = torch.nan_to_num(tr_next, nan=0.0, posinf=0.0, neginf=0.0)
                 self._tr = tr_next
+
                 self._ema.mul_(self._ema_beta).add_(S, alpha=(1.0 - self._ema_beta))
                 self._ema[:] = torch.nan_to_num(self._ema, nan=0.0, posinf=0.0, neginf=0.0)
+
                 self._counters.add_(S)
                 self._t_seen += 1
 
@@ -120,6 +124,7 @@ class SASNN(BaseMethod):
                 sel_idx = torch.arange(N, device=self.device)
             else:
                 sel_idx = torch.topk(score, k=kk, dim=0, largest=True, sorted=False).indices
+
             mask_neurons = torch.zeros(N, dtype=out.dtype, device=self.device)
             mask_neurons[sel_idx] = 1.0
 

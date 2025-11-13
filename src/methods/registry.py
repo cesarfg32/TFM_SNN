@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from typing import Optional, List, Dict, Any
 from torch import nn
 import torch
@@ -19,22 +20,32 @@ from .colanet import CoLaNET
 # ------------------ validación y filtrado ------------------
 
 ALLOWED_KEYS: Dict[str, set[str]] = {
-    "ewc": {"lambd", "fisher_batches"},
-    "rehearsal": {"buffer_size", "replay_ratio"},
+    "ewc": {
+        "lambd", "fisher_batches",
+        # NUEVOS parámetros de precisión/rendimiento/orientación
+        "fisher_precision", "fisher_amp_dtype", "permute_policy",
+    },
+    "rehearsal": {
+        "buffer_size", "replay_ratio",
+        # NUEVOS
+        "compress_mode", "pin_memory", "max_total_bs",
+    },
     "sa-snn": {
         "attach_to", "k", "tau", "th_min", "th_max", "p", "vt_scale",
         "flatten_spatial", "assume_binary_spikes", "reset_counters_each_task",
-        "ema_beta", "update_on_eval"
+        "ema_beta", "update_on_eval",
     },
     "as-snn": {
         "measure_at", "attach_to", "gamma_ratio", "lambda_a", "ema",
         "do_synaptic_scaling", "scale_clip", "scale_bias", "penalty_mode",
-        "activity_verbose", "activity_every", "eps", "name_suffix"
+        "activity_verbose", "activity_every", "eps", "name_suffix",
     },
     "sca-snn": {
         "attach_to", "flatten_spatial", "num_bins", "anchor_batches",
         "bin_lo", "bin_hi", "max_per_bin", "beta", "bias",
-        "soft_mask_temp", "habit_decay", "verbose", "log_every"
+        "soft_mask_temp", "habit_decay", "verbose", "log_every",
+        # NUEVOS
+        "target_active_frac", "T",
     },
     "naive": set(),
     "colanet": {"attach_to", "flatten_spatial"},
@@ -46,14 +57,18 @@ REQUIRED: Dict[str, set[str]] = {
 }
 
 GENERIC_TO_DROP = {
-    "T", "epochs", "batch_size", "lr", "es_patience", "es_min_delta",
-    "compile", "compile_mode", "amp", "encoder", "gain"
+    "T", "epochs", "batch_size", "lr",
+    "es_patience", "es_min_delta",
+    "compile", "compile_mode", "amp",
+    "encoder", "gain",
 }
+
 
 def _filter_kwargs_for(method_name: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     method = method_name.lower().strip()
     allowed = ALLOWED_KEYS.get(method, set())
     return {k: v for k, v in kwargs.items() if (k in allowed) and (k not in GENERIC_TO_DROP)}
+
 
 def _validate_required(method_name: str, kwargs: Dict[str, Any]) -> None:
     req = REQUIRED.get(method_name.lower().strip(), set())
@@ -61,6 +76,7 @@ def _validate_required(method_name: str, kwargs: Dict[str, Any]) -> None:
     if missing:
         ms = ", ".join(missing)
         raise AssertionError(f"Faltan parámetros requeridos para '{method_name}': {ms}")
+
 
 # ------------------ fábrica ------------------
 
@@ -74,7 +90,8 @@ def build_method(
 ) -> BaseMethod:
     """
     Construye el método a partir del nombre. Soporta composites "a+b".
-    Todos los métodos aceptan device/loss_fn en __init__ y (si lo necesitan) el model se inyecta en before_task.
+    Todos los métodos aceptan device/loss_fn en __init__ y (si lo necesitan)
+    el model se inyecta en before_task.
     """
     device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
     lname = name.lower().strip()
@@ -88,7 +105,6 @@ def build_method(
         m = main.lower().strip()
 
         if m == "naive":
-            # No necesita nada más
             return Naive()
 
         if m == "ewc":

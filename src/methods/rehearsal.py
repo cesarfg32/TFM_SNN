@@ -15,9 +15,9 @@ from .base import BaseMethod
 class RehearsalConfig:
     buffer_size: int = 10_000
     replay_ratio: float = 0.2
-    compress_mode: str = "auto"   # "auto" | "u8" | "fp16" | "none"
+    compress_mode: str = "auto" # "auto" | "u8" | "fp16" | "none"
     pin_memory: bool = True
-    max_total_bs: Optional[int] = None  # ← NUEVO: tope al batch efectivo (task+replay)
+    max_total_bs: Optional[int] = None # ← NUEVO: tope al batch efectivo (task+replay)
 
 
 class CompressedReservoirBuffer:
@@ -59,7 +59,7 @@ class CompressedReservoirBuffer:
         x, y = sample
         x = (x.detach().cpu() if x.is_cuda else x.detach()).contiguous()
         y = (y.detach().cpu() if y.is_cuda else y.detach()).contiguous()
-        y = y.to(dtype=torch.float32).reshape(())  # escalar 0-D
+        y = y.to(dtype=torch.float32).reshape(()) # escalar 0-D
 
         if self._shape is None:
             self._shape = tuple(x.shape)
@@ -186,7 +186,7 @@ class RehearsalMethod(BaseMethod):
         replay_ratio: float = 0.2,
         compress_mode: str = "auto",
         pin_memory: bool = True,
-        max_total_bs: Optional[int] = None,  # ← NUEVO
+        max_total_bs: Optional[int] = None, # ← NUEVO
         device: Optional[torch.device] = None,
         loss_fn=None,
     ):

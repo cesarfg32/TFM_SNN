@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from typing import Sequence
 from torch import nn
 import torch
+
 from .base import BaseMethod
+
 
 class CompositeMethod(BaseMethod):
     """
@@ -68,5 +71,5 @@ class CompositeMethod(BaseMethod):
         loader = train_loader
         for m in self.methods:
             if hasattr(m, "prepare_train_loader"):
-                loader = m.prepare_train_loader(loader)  # type: ignore[attr-defined]
+                loader = m.prepare_train_loader(loader) # type: ignore[attr-defined]
         return loader

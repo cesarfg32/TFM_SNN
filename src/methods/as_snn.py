@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from typing import Optional, Tuple, Dict, List, Any, Union
 
 import torch
@@ -19,18 +20,25 @@ def _resolve_modules_by_name(model: nn.Module, name_substr: str) -> List[tuple[s
 
 
 def _norm_scale_clip(sc: Any) -> Tuple[float, float]:
-    if sc is None: return (0.5, 2.0)
+    if sc is None:
+        return (0.5, 2.0)
     if isinstance(sc, (list, tuple)):
-        if len(sc) == 2: lo, hi = sc; return (float(lo), float(hi))
-        if len(sc) == 1: v = float(sc[0]); return (v, v)
+        if len(sc) == 2:
+            lo, hi = sc
+            return (float(lo), float(hi))
+        if len(sc) == 1:
+            v = float(sc[0])
+            return (v, v)
     try:
-        v = float(sc); return (v, v)
+        v = float(sc)
+        return (v, v)
     except Exception:
         return (0.5, 2.0)
 
 
 def _first_tensor(x) -> Optional[torch.Tensor]:
-    if isinstance(x, torch.Tensor): return x
+    if isinstance(x, torch.Tensor):
+        return x
     if isinstance(x, (tuple, list)) and x:
         return x[0] if isinstance(x[0], torch.Tensor) else None
     if isinstance(x, dict):
@@ -54,8 +62,8 @@ class AS_SNN(BaseMethod):
         lambda_a: float = 2.5,
         gamma_ratio: float = 0.5,
         ema: float = 0.9,
-        penalty_mode: str = "l1",      # "l1" | "l2"
-        measure_at: Optional[str] = None,  # "modules" | "input" | "both"
+        penalty_mode: str = "l1", # "l1" | "l2"
+        measure_at: Optional[str] = None, # "modules" | "input" | "both"
         attach_to: Optional[str] = None,
         do_synaptic_scaling: bool = False,
         scale_clip: Union[float, Tuple[float, float], List[float]] = (0.5, 2.0),
@@ -139,9 +147,8 @@ class AS_SNN(BaseMethod):
         for k in ("alpha_ema", "alpha_last"):
             tk = st.get(k)
             if not isinstance(tk, torch.Tensor) or tuple(tk.shape) != shape or tk.device != device:
-                st[k] = torch.zeros_like(init_like, device=device)  # type: ignore[index]
+                st[k] = torch.zeros_like(init_like, device=device) # type: ignore[index]
             else:
-                # nada; ya está bien dimensionado
                 pass
 
     def _phi(self, a: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
@@ -157,16 +164,18 @@ class AS_SNN(BaseMethod):
         if x is None or not isinstance(x, torch.Tensor): return
 
         self._maybe_on_device(x); device = x.device
+
         if self.measure_at in ("input", "both"):
-            a_now = self._as_float_unit(x).mean()  # escalar
+            a_now = self._as_float_unit(x).mean() # escalar
             if self._alpha_in_ema is None:
                 self._alpha_in_ema = a_now.detach().clone().to(device)
                 self._alpha_in_last = a_now.detach().clone().to(device)
             else:
                 self._alpha_in_ema.mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema))
                 self._alpha_in_last.copy_(a_now.detach())
+
             gamma = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
-            pen = self.lambda_a * self._phi(a_now, gamma)  # escalar
+            pen = self.lambda_a * self._phi(a_now, gamma) # escalar
             self._batch_penalties.append(pen)
 
         self._batch_idx += 1
@@ -184,14 +193,13 @@ class AS_SNN(BaseMethod):
             self._maybe_on_device(y); device = y.device
 
             # Permite escalar (por capa) o vector (por canal) según lo que devuelva tu forward
-            # Si tu forward produce (B, N, ...) esto dará vector N; si produce cualquier otra cosa -> escalar.
             a_raw = self._as_float_unit(y)
             if a_raw.ndim >= 2:
                 # media sobre batch y espacial -> vector por canal
                 dims = (0,) + tuple(range(2, a_raw.ndim))
                 a_now = a_raw.mean(dim=dims)
             else:
-                a_now = a_raw.mean()  # escalar
+                a_now = a_raw.mean() # escalar
 
             # Estado dimensionado como a_now
             self._ensure_layer_entry(name, device, a_now.detach())
@@ -199,13 +207,13 @@ class AS_SNN(BaseMethod):
 
             # Mover/ajustar dispositivos si hiciera falta
             for k in ("alpha_ema", "alpha_last"):
-                tk = st[k]  # type: ignore[index]
+                tk = st[k] # type: ignore[index]
                 if isinstance(tk, torch.Tensor) and tk.device != device:
-                    st[k] = tk.to(device=device, non_blocking=True)  # type: ignore[index]
+                    st[k] = tk.to(device=device, non_blocking=True) # type: ignore[index]
 
             # EMA
-            st["alpha_ema"].mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema))  # type: ignore[index]
-            st["alpha_last"].copy_(a_now.detach())  # type: ignore[index]
+            st["alpha_ema"].mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema)) # type: ignore[index]
+            st["alpha_last"].copy_(a_now.detach()) # type: ignore[index]
 
             # Penalización → SIEMPRE escalar (para sumar con la loss base sin broadcasting)
             gamma = torch.full_like(a_now, self.gamma_ratio) if a_now.ndim > 0 else torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
@@ -220,6 +228,7 @@ class AS_SNN(BaseMethod):
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
         if self._pre_hook_handle is None:
             self._pre_hook_handle = model.register_forward_pre_hook(self._pre_forward_hook, with_kwargs=False)
+
         if self.measure_at in ("modules", "both") and not self._fw_handles:
             modules_to_hook: List[tuple[str, nn.Module]] = []
             if self.attach_to:
@@ -231,16 +240,15 @@ class AS_SNN(BaseMethod):
 
             registered = set()
             for name, mod in modules_to_hook:
-                if mod in registered: 
+                if mod in registered:
                     continue
                 h = mod.register_forward_hook(self._make_forward_hook(name), with_kwargs=False)
                 self._fw_handles.append(h)
-
                 # Pre-crea entrada con escalar; si luego vemos vector, se re-dimensiona dinámicamente
                 p0 = next(mod.parameters(), None)
                 dev = p0.device if p0 is not None else (self._device or torch.device("cpu"))
-                self._ensure_layer_entry(name, dev, torch.zeros((), device=dev))  # escalar por defecto
-                self._layer_stats[name]["module"] = mod  # type: ignore[index]
+                self._ensure_layer_entry(name, dev, torch.zeros((), device=dev)) # escalar por defecto
+                self._layer_stats[name]["module"] = mod # type: ignore[index]
                 registered.add(mod)
 
     def penalty(self) -> torch.Tensor:
@@ -252,6 +260,7 @@ class AS_SNN(BaseMethod):
 
     @torch.no_grad()
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
+        # synaptic scaling opcional
         if not self.do_synaptic_scaling:
             return
         lo, hi = self.scale_clip
@@ -266,16 +275,15 @@ class AS_SNN(BaseMethod):
                 a = float(alpha_ema.mean().item())
             else:
                 continue
-
-            if a <= 0.0: 
+            if a <= 0.0:
                 continue
 
             s_nominal = self.gamma_ratio / max(a, self.eps)
             s = float(max(lo, min(hi, s_nominal)))
             try:
-                mod.weight.mul_(s)  # type: ignore[attr-defined]
+                mod.weight.mul_(s) # type: ignore[attr-defined]
                 if self.scale_bias and getattr(mod, "bias", None) is not None:
-                    mod.bias.mul_(s)   # type: ignore[attr-defined]
+                    mod.bias.mul_(s) # type: ignore[attr-defined]
             except Exception:
                 pass
 
@@ -309,8 +317,8 @@ class AS_SNN(BaseMethod):
             ae = st.get("alpha_ema")
             al = st.get("alpha_last")
             layers[name] = {
-                "alpha_ema_mean": float(ae.mean().item()) if isinstance(ae, torch.Tensor) else None,  # type: ignore[arg-type]
-                "alpha_last_mean": float(al.mean().item()) if isinstance(al, torch.Tensor) else None,  # type: ignore[arg-type]
+                "alpha_ema_mean": float(ae.mean().item()) if isinstance(ae, torch.Tensor) else None, # type: ignore[arg-type]
+                "alpha_last_mean": float(al.mean().item()) if isinstance(al, torch.Tensor) else None, # type: ignore[arg-type]
                 "shape": tuple(ae.shape) if isinstance(ae, torch.Tensor) else (),
             }
         out["layers"] = layers

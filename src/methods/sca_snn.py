@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict
 
@@ -8,20 +9,21 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .base import BaseMethod
-from src.nn_io import _forward_with_cached_orientation  # orientación consistente
+from src.nn_io import _forward_with_cached_orientation # orientación consistente
+
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
 # ------------------------------------------------------------
 @dataclass
 class SCAConfig:
-    attach_to: Optional[str] = None   # p.ej. "f6" en PilotNetSNN; None -> primera Linear
+    attach_to: Optional[str] = None # p.ej. "f6" en PilotNetSNN; None -> primera Linear
     flatten_spatial: bool = True
 
     # Similaridad (anchors)
     num_bins: int = 50
     bin_lo: float = -1.0
-    bin_hi: float =  1.0
+    bin_hi: float = 1.0
     anchor_batches: int = 8
     max_per_bin: int = 1024
 
@@ -41,12 +43,14 @@ class SCAConfig:
     # compat temporal
     T: Optional[int] = None
 
+
 # ------------------ utilidades de forma/similitud ------------------
 def _find_first_linear(m: nn.Module) -> Optional[nn.Module]:
     for mod in m.modules():
         if isinstance(mod, nn.Linear):
             return mod
     return None
+
 
 def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
     cur = m
@@ -56,25 +60,26 @@ def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
         cur = getattr(cur, p)
     return cur if isinstance(cur, nn.Module) else None
 
+
 def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tuple[torch.Tensor, tuple[int, ...], bool]:
     """Normaliza a (T,B,N) para aplicar máscara por neurona."""
     y = y.contiguous()
     orig = y.shape
 
-    if y.ndim == 2:  # (B,N) ó (T,N)
+    if y.ndim == 2: # (B,N) ó (T,N)
         return y.unsqueeze(0).contiguous(), orig, True
 
-    if y.ndim == 3:  # (T,B,N) o (B,T,N) o (B,N,T)
+    if y.ndim == 3: # (T,B,N) o (B,T,N) o (B,N,T)
         TBN = y
-        if T_hint and y.shape[-1] == T_hint:   # (B,N,T) -> (T,B,N)
+        if T_hint and y.shape[-1] == T_hint: # (B,N,T) -> (T,B,N)
             TBN = y.permute(2, 0, 1).contiguous()
             return TBN, orig, True
-        if T_hint and y.shape[1] == T_hint:    # (B,T,N) -> (T,B,N)
+        if T_hint and y.shape[1] == T_hint: # (B,T,N) -> (T,B,N)
             TBN = y.permute(1, 0, 2).contiguous()
             return TBN, orig, True
         return TBN.contiguous(), orig, False
 
-    if y.ndim == 5:  # (T,B,C,H,W) o (B,T,C,H,W)
+    if y.ndim == 5: # (T,B,C,H,W) o (B,T,C,H,W)
         if T_hint and y.shape[0] != T_hint:
             y = y.permute(1, 0, 2, 3, 4).contiguous()
         T, B, C, H, W = y.shape
@@ -83,6 +88,7 @@ def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tu
         return y.flatten(3).mean(3).contiguous(), orig, (T_hint is not None)
 
     return y.contiguous(), orig, False
+
 
 def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, flatten_spatial: bool) -> torch.Tensor:
     yTBN = yTBN.contiguous()
@@ -96,6 +102,7 @@ def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, 
         return yTBN
     return yTBN
 
+
 def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Tensor:
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
     y = y.clamp(min=lo, max=hi)
@@ -104,12 +111,14 @@ def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Te
     idx = torch.floor(t * float(num_bins)).to(torch.int64)
     return idx.clamp_(0, num_bins - 1).contiguous()
 
+
 def _row_normalize_pos(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     x = torch.relu(x)
     s = x.sum(dim=1, keepdim=True)
     s = torch.clamp(s, min=eps)
     return x / s
+
 
 def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
@@ -121,10 +130,12 @@ def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.
     out = 0.5 * (kl_pq + kl_qp)
     return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
+
 def _similarity_from_kl(kl_vals: torch.Tensor) -> float:
     s = (1.0 / (1.0 + kl_vals))
     s = torch.clamp(s, 0.0, 1.0)
     return float(s.mean().item())
+
 
 def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | None = None) -> torch.Tensor:
     idx = torch.nan_to_num(idx, nan=0.0, posinf=0.0, neginf=0.0)
@@ -138,12 +149,14 @@ def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | No
     weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
     return torch.bincount(idx, weights=weights, minlength=n_bins)
 
+
 def _topk_safe(score: torch.Tensor, k: int) -> torch.Tensor:
     s = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
     k = max(1, int(k))
     if k >= s.numel():
         return torch.arange(s.numel(), device=s.device)
     return torch.topk(s, k=k, largest=True, sorted=False).indices
+
 
 def _to_single_worker_loader_like(loader: DataLoader) -> DataLoader:
     """Copia un DataLoader con num_workers=0 y sin pin/persistentes."""
@@ -163,6 +176,7 @@ def _to_single_worker_loader_like(loader: DataLoader) -> DataLoader:
         )
     except Exception:
         return loader
+
 
 # ---------------------------- método ----------------------------
 class SCA_SNN(BaseMethod):
@@ -235,15 +249,15 @@ class SCA_SNN(BaseMethod):
         # Caso directo: (B, N...)
         if t.ndim >= 2 and t.shape[0] == B:
             if t.ndim >= 4 and self.cfg.flatten_spatial:
-                t = t.mean(dim=(-1, -2))  # (B,C)
+                t = t.mean(dim=(-1, -2)) # (B,C)
             return t.view(B, -1)
 
         # Reordenar si B está en otro eje
         if B in t.shape:
             bdim = list(t.shape).index(B)
             perm = [bdim] + [i for i in range(t.ndim) if i != bdim]
-            t = t.permute(*perm).contiguous()  # (B, ...)
-            if t.ndim >= 3 and t.shape[1] == self._T_seq:  # (B, T, ...)
+            t = t.permute(*perm).contiguous() # (B, ...)
+            if t.ndim >= 3 and t.shape[1] == self._T_seq: # (B, T, ...)
                 t = t.mean(dim=1)
             if t.ndim >= 4 and self.cfg.flatten_spatial:
                 t = t.mean(dim=(-1, -2))
@@ -253,7 +267,7 @@ class SCA_SNN(BaseMethod):
         if t.ndim >= 3 and t.shape[0] == self._T_seq:
             if t.ndim >= 3 and t.shape[1] != 0:
                 if t.shape[1] == B:
-                    t = t.mean(dim=0)  # (B, ...)
+                    t = t.mean(dim=0) # (B, ...)
                     if t.ndim >= 3 and self.cfg.flatten_spatial:
                         t = t.mean(dim=(-1, -2))
                     return t.view(B, -1)
@@ -266,10 +280,10 @@ class SCA_SNN(BaseMethod):
 
         v = out
         if v.ndim >= 3 and self.cfg.flatten_spatial:
-            v = v.mean(dim=tuple(range(2, v.ndim)))  # agrega espacial
+            v = v.mean(dim=tuple(range(2, v.ndim))) # agrega espacial
         if v.ndim >= 2 and v.shape[0] == self._T_seq:
-            v = v.mean(dim=0)  # promedia T si va delante
-        v = v.view(-1) if v.ndim == 1 else v.mean(dim=0)  # (N,)
+            v = v.mean(dim=0) # promedia T si va delante
+        v = v.view(-1) if v.ndim == 1 else v.mean(dim=0) # (N,)
         v = torch.nan_to_num(v.float(), nan=0.0, posinf=0.0, neginf=0.0)
         return v.view(1, -1).repeat(B, 1).contiguous()
 
@@ -290,7 +304,7 @@ class SCA_SNN(BaseMethod):
             self._setup_per_neuron_state(N, device=dev_target)
 
         # métrica de reutilización acumulada
-        Rn = torch.sigmoid(self._R)  # (N,)
+        Rn = torch.sigmoid(self._R) # (N,)
         rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
 
         # NUEVO: si target_active_frac está definido, ajusta umbral por cuantil de Rn
@@ -299,7 +313,7 @@ class SCA_SNN(BaseMethod):
         if isinstance(taf, float) and 0.0 < taf < 1.0:
             try:
                 q = torch.quantile(Rn.detach(), 1.0 - taf)
-                thr = max(float(q.item()), rho)  # respeta límite inferior basado en sim_min
+                thr = max(float(q.item()), rho) # respeta límite inferior basado en sim_min
             except Exception:
                 thr = rho
 
@@ -342,7 +356,7 @@ class SCA_SNN(BaseMethod):
                 self._Gacc = self._Gacc.to(dev, non_blocking=True)
             if (self._R is not None) and (self._R.device != dev):
                 self._R = self._R.to(dev, non_blocking=True)
-            g_row = grad.pow(2).sum(dim=1).sqrt()  # (N_out,)
+            g_row = grad.pow(2).sum(dim=1).sqrt() # (N_out,)
             g_row = torch.nan_to_num(g_row, nan=0.0, posinf=0.0, neginf=0.0)
             self._Gacc.add_(g_row)
 
@@ -375,6 +389,7 @@ class SCA_SNN(BaseMethod):
 
             # Hook temporal: acumula TODAS las salidas de la capa objetivo a lo largo de T
             grab: Dict[str, List[torch.Tensor]] = {"outs": []}
+
             def _cap_hook(_m, _inp, out):
                 if torch.is_tensor(out):
                     grab["outs"].append(out.detach())
@@ -410,18 +425,18 @@ class SCA_SNN(BaseMethod):
                         raw = outs[0]
                     else:
                         try:
-                            raw = torch.stack(outs, dim=0).contiguous()  # (T,B,N...) esperado
+                            raw = torch.stack(outs, dim=0).contiguous() # (T,B,N...) esperado
                         except Exception:
                             raw = outs[-1]
 
                     # Normaliza a (B,N) promediando T si procede
-                    F = self._norm_BN(raw, B=B)  # (B,N)
+                    F = self._norm_BN(raw, B=B) # (B,N)
                     if F.device != device:
                         F = F.to(device, non_blocking=True)
                     F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()
 
                     # Binning y acumulación
-                    bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
+                    bidx = _bin_index(y, lo, hi, num_bins) # (B,)
                     for b in range(num_bins):
                         mask = (bidx == b)
                         if mask.any():
@@ -447,7 +462,7 @@ class SCA_SNN(BaseMethod):
 
             anchors = torch.stack([
                 (sum_per_bin[b] / max(1, cnt_per_bin[b])) for b in range(num_bins)
-            ], dim=0).contiguous()  # (num_bins, N)
+            ], dim=0).contiguous() # (num_bins, N)
             anchors = torch.nan_to_num(anchors, nan=0.0, posinf=0.0, neginf=0.0)
             anchors = _row_normalize_pos(anchors)
             return anchors
@@ -569,7 +584,7 @@ class SCA_SNN(BaseMethod):
 
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
         try:
-            _ = self.penalty()  # decay + reset Gacc
+            _ = self.penalty() # decay + reset Gacc
         except Exception:
             pass
 
@@ -609,7 +624,7 @@ class SCA_SNN(BaseMethod):
         self._N = None
         self._R = None
         self._Gacc = None
-        self._suspend_mask = False  # reset de seguridad
+        self._suspend_mask = False # reset de seguridad
         self._warned_shape_once = False
 
     # introspección

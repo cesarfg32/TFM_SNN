@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from typing import Any, Dict, Optional, Union
 
 import torch
@@ -16,7 +17,7 @@ __all__ = [
 ]
 
 # ============================================================
-#  Estado global + configuración (retro-compat runner)
+# Estado global + configuración (retro-compat runner)
 # ============================================================
 # Antes era un bool; ahora guardamos una config flexible pero
 # mantenemos verdad/falsedad al evaluar get_encode_runtime().
@@ -78,7 +79,7 @@ def get_encode_runtime(key: Optional[str] = None) -> Any:
 
 
 # ============================================================
-#  Utilidades internas / alias públicos
+# Utilidades internas / alias públicos
 # ============================================================
 def _to_device(obj: Any, device: torch.device, non_blocking: bool = True) -> Any:
     if torch.is_tensor(obj):
@@ -121,7 +122,7 @@ def _first_tensor(x: Any) -> Optional[torch.Tensor]:
     if isinstance(x, dict):
         # heurística: claves típicas primero
         for key in ("logits", "pred", "y_hat", "output", "out"):
-            v = x.get(key, None)  # type: ignore[arg-type]
+            v = x.get(key, None) # type: ignore[arg-type]
             if torch.is_tensor(v):
                 return v
         for v in x.values():
@@ -142,9 +143,9 @@ def _first_tensor(x: Any) -> Optional[torch.Tensor]:
 def _maybe_BT_to_TB(x: torch.Tensor, B_hint: Optional[int]) -> torch.Tensor:
     """
     Normaliza a (T,B,...) SOLO cuando:
-      - x.ndim >= 5  típicamente spikes (B,T,C,H,W) / (T,B,C,H,W)
-      - x.ndim == 3  secuencias (B,T,F) / (T,B,F)
-      - x.ndim == 2  borde (B,T) / (T,B)
+      - x.ndim >= 5 típicamente spikes (B,T,C,H,W) / (T,B,C,H,W)
+      - x.ndim == 3 secuencias (B,T,F) / (T,B,F)
+      - x.ndim == 2 borde (B,T) / (T,B)
     No toca tensores 4D de imagen (B,C,H,W).
     """
     if not torch.is_tensor(x) or B_hint is None:
@@ -184,7 +185,7 @@ def _bt_to_tb_structure(x: Any, B_hint: Optional[int]) -> Any:
 
 
 # ============================================================
-#  Forward "seguro" con AMP + orientación temporal
+# Forward "seguro" con AMP + orientación temporal
 # ============================================================
 def _forward_with_cached_orientation(
     model: nn.Module,
@@ -244,7 +245,7 @@ def _forward_with_cached_orientation(
 
 
 # ============================================================
-#  Alineación de targets a la forma de y_hat
+# Alineación de targets a la forma de y_hat
 # ============================================================
 def _align_target_shape(y_hat: Any, y: torch.Tensor) -> torch.Tensor:
     """
@@ -252,6 +253,7 @@ def _align_target_shape(y_hat: Any, y: torch.Tensor) -> torch.Tensor:
     - (B,) <-> (B,1)
     Tolera y_hat como dict/tuple/list; extrae el primer tensor de referencia.
     """
+    # ref: primer tensor de y_hat, o y_hat si ya es tensor
     ref = _first_tensor(y_hat) if not torch.is_tensor(y_hat) else y_hat
     if ref is None or not torch.is_tensor(y):
         return y

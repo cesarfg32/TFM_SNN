@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """EWC (Elastic Weight Consolidation) para mitigar el olvido catastrófico."""
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -18,15 +19,15 @@ class EWCConfig:
     # Nº de batches para estimar Fisher
     fisher_batches: int = 25
     # Precisión del cálculo de Fisher:
-    #  - "fp32" (por defecto): más estable, más lento
-    #  - "bf16" / "fp16": rápido, posible infrarrepresentación del grad
-    #  - "amp": usa autocast con dtype por defecto o el indicado en fisher_amp_dtype
+    # - "fp32" (por defecto): más estable, más lento
+    # - "bf16" / "fp16": rápido, posible infrarrepresentación del grad
+    # - "amp": usa autocast con dtype por defecto o el indicado en fisher_amp_dtype
     fisher_precision: str = "fp32"
     # Si fisher_precision == "amp", se puede forzar dtype: "bf16" | "fp16"
     fisher_amp_dtype: Optional[str] = None
     # Política de permuta/orientación temporal:
-    #  - "auto": usa la pista del batch (y) para normalizar (T,B,...) si procede
-    #  - "skip": no pasamos 'y' al forward helper (evita permutas si tu modelo ya es coherente)
+    # - "auto": usa la pista del batch (y) para normalizar (T,B,...) si procede
+    # - "skip": no pasamos 'y' al forward helper (evita permutas si tu modelo ya es coherente)
     permute_policy: str = "auto"
 
 
@@ -115,17 +116,13 @@ class EWC:
                 device_type="cuda",
                 dtype=amp_dtype,
                 enabled=bool(use_autocast),
-            ) if self.device.type == "cuda" else torch.no_grad()  # placeholder, no se usa en CPU
+            ) if self.device.type == "cuda" else None
 
-            # Usamos el contexto sólo si está habilitado
-            if self.device.type == "cuda" and bool(use_autocast):
-                cm = ctx
-            else:
-                # contexto vacío
-                class _NullCtx:
-                    def __enter__(self): return None
-                    def __exit__(self, *args): return False
-                cm = _NullCtx()
+            class _NullCtx:
+                def __enter__(self): return None
+                def __exit__(self, *args): return False
+
+            cm = ctx if (self.device.type == "cuda" and bool(use_autocast)) else _NullCtx()
 
             with cm:
                 for x, y in loader:
@@ -139,12 +136,10 @@ class EWC:
                         self.device, use_amp=False,
                         phase_hint=hint, phase="fisher"
                     )
-
                     # Alineación del target a dtype/shape de y_hat sin forzar FP32
                     target = _align_target_shape(y_hat, y).to(
                         device=y_hat.device, dtype=y_hat.dtype, non_blocking=True
                     )
-
                     # Pérdida en el dtype actual (fp32/bf16/fp16 según caso)
                     loss = self.loss_fn(y_hat, target).mean()
 
@@ -153,7 +148,6 @@ class EWC:
 
                     for n, p in self.model.named_parameters():
                         if p.requires_grad and p.grad is not None:
-                            # Acumulamos en el dispositivo del propio parámetro
                             fisher[n] += p.grad.detach().pow(2)
 
                     n_batches += 1
@@ -165,8 +159,10 @@ class EWC:
                 fisher[n] /= float(n_batches)
 
         self._fisher = fisher
+
         if was_training:
             self.model.train()
+
         return n_batches
 
     def penalty(self) -> torch.Tensor:
@@ -192,8 +188,8 @@ class EWCMethod(BaseMethod):
         fisher_batches: int = 100,
         # Nuevos parámetros de rendimiento/precisión
         fisher_precision: str = "fp32",
-        fisher_amp_dtype: Optional[str] = None,  # "bf16" | "fp16" | None
-        permute_policy: str = "auto",            # "auto" | "skip"
+        fisher_amp_dtype: Optional[str] = None, # "bf16" | "fp16" | None
+        permute_policy: str = "auto", # "auto" | "skip"
         device: Optional[torch.device] = None,
         loss_fn: Optional[nn.Module] = None,
     ):
@@ -211,6 +207,7 @@ class EWCMethod(BaseMethod):
             device=self.device,
         )
         self.name = f"ewc_lam_{lambd:.0e}"
+
         # Flags inyectables desde cfg['logging']['ewc']
         self.inner_verbose = getattr(self, "inner_verbose", False)
         self.inner_every = getattr(self, "inner_every", 50)

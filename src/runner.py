@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from pathlib import Path
 import sys, json, torch, math, os, time as _time, logging, gc
 from typing import Dict, Any, Tuple, List, Optional, Union
@@ -15,6 +16,7 @@ try:
 except Exception:
     pass
 
+
 def _get_mp_ctx():
     for name in ("forkserver", "spawn"):
         try:
@@ -22,6 +24,7 @@ def _get_mp_ctx():
         except Exception:
             continue
     return None
+
 
 from torch.utils.data import DataLoader
 from src.training import TrainConfig, train_supervised, set_encode_runtime
@@ -50,6 +53,7 @@ def _model_label(model, tfm) -> str:
     ch = "rgb" if not getattr(tfm, "to_gray", True) else "gray"
     return f"{cls}_{h}x{w}_{ch}"
 
+
 def _safe_write(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -57,6 +61,7 @@ def _safe_write(path: Path, payload) -> None:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         else:
             f.write(str(payload))
+
 
 def _build_eval_matrix(results: Dict[str, Dict[str, float]]) -> Tuple[List[str], List[List[float]]]:
     names = list(results.keys())
@@ -72,6 +77,7 @@ def _build_eval_matrix(results: Dict[str, Dict[str, float]]) -> Tuple[List[str],
                 mat[i][j] = float(results[ti][key])
     return names, mat
 
+
 def _compute_forgetting(names: List[str], mat: List[List[float]]) -> Dict[str, Dict[str, float]]:
     out: Dict[str, Dict[str, float]] = {}
     n = len(names)
@@ -86,6 +92,7 @@ def _compute_forgetting(names: List[str], mat: List[List[float]]) -> Dict[str, D
         f_rel = float(f_abs / best) if best > 0 else math.nan
         out[names[i]] = {"forget_abs": f_abs, "forget_rel": f_rel, "best_mae": best, "final_mae": final}
     return out
+
 
 def _forgetting_summary(names: List[str], per_task: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
     import re
@@ -111,6 +118,7 @@ def _forgetting_summary(names: List[str], per_task: Dict[str, Dict[str, float]])
     summary["avg_forget_rel"] = (sum(rels) / len(rels)) if rels else None
     return summary
 
+
 def _torch_cuda_mem_peak_mb() -> Optional[float]:
     if not torch.cuda.is_available():
         return None
@@ -119,19 +127,21 @@ def _torch_cuda_mem_peak_mb() -> Optional[float]:
     except Exception:
         return None
 
+
 def _torch_num_params(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
+
 
 # --- CSV history ---
 def _to_csv_lines_from_history(history: dict) -> str:
     cols = ["epoch", "train_loss", "val_loss", "val_mae", "val_mse", "train_mae", "train_mse"]
     L = max([
         len(history.get("train_loss", [])),
-        len(history.get("val_loss",   [])),
-        len(history.get("val_mae",    [])),
-        len(history.get("val_mse",    [])),
-        len(history.get("train_mae",  [])),
-        len(history.get("train_mse",  [])),
+        len(history.get("val_loss", [])),
+        len(history.get("val_mae", [])),
+        len(history.get("val_mse", [])),
+        len(history.get("train_mae", [])),
+        len(history.get("train_mse", [])),
         0
     ])
     lines = [",".join(cols)]
@@ -144,12 +154,14 @@ def _to_csv_lines_from_history(history: dict) -> str:
         lines.append(",".join(row))
     return "\n".join(lines)
 
+
 def _pick_c2_name(task_names: List[str]) -> Optional[str]:
     import re
     for n in task_names:
         if re.search(r"(c2|circuito2|track2|tarea2|task2)", n, re.I):
             return n
     return task_names[1] if len(task_names) >= 2 else (task_names[-1] if task_names else None)
+
 
 # helper genérico (solo fallback por errores de DataLoader/WSL)
 def _to_single_worker_loader(loader: DataLoader) -> DataLoader:
@@ -170,11 +182,13 @@ def _to_single_worker_loader(loader: DataLoader) -> DataLoader:
     except Exception:
         return loader
 
+
 def _nan_to_none_matrix(M: List[List[float]]) -> List[List[Optional[float]]]:
     out: List[List[Optional[float]]] = []
     for row in M:
         out.append([None if (isinstance(v, float) and math.isnan(v)) else float(v) for v in row])
     return out
+
 
 def _load_checkpoint_if_exists(
     task_dir: Path,
@@ -194,13 +208,16 @@ def _load_checkpoint_if_exists(
                 continue
     return False
 
+
 # Detectores de errores típicos
 _ERR_TRIGGERS_SHM = ("bus error", "unexpected bus error", "shared memory", "shm", "dataloader worker", "worker exited", "multiprocessing")
 _ERR_TRIGGERS_ENOSPC = ("no space left on device", "errno 28")
 
+
 def _is_trigger(msg: str, triggers: Tuple[str, ...]) -> bool:
     m = msg.lower()
     return any(t in m for t in triggers)
+
 
 def _rebuild_loaders_safe(
     make_loader_fn,
@@ -230,6 +247,7 @@ def _rebuild_loaders_safe(
     )
     return tr2, va2, te2
 
+
 def _eval_with_fallback(loader, model, loss_fn, device, use_amp):
     try:
         return eval_loader(loader, model, loss_fn=loss_fn, device=device, use_amp=use_amp)
@@ -242,6 +260,7 @@ def _eval_with_fallback(loader, model, loss_fn, device, use_amp):
         else:
             raise
 
+
 # ================================================
 def run_continual(
     task_list: List[dict],
@@ -253,28 +272,28 @@ def run_continual(
     out_root: Optional[Union[Path, str]] = None,
     verbose: bool = True,
 ):
-    data  = cfg["data"];  optim = cfg["optim"];  cont = cfg["continual"];  naming = cfg.get("naming", {})
+    data = cfg["data"]; optim = cfg["optim"]; cont = cfg["continual"]; naming = cfg.get("naming", {})
 
-    encoder  = str(data["encoder"])
-    T        = int(data["T"])
-    gain     = float(data["gain"])
-    seed     = int(data.get("seed", 42))
+    encoder = str(data["encoder"])
+    T = int(data["T"])
+    gain = float(data["gain"])
+    seed = int(data.get("seed", 42))
     use_offline = bool(data.get("use_offline_spikes", False))
 
-    epochs  = int(optim["epochs"])
-    bs      = int(optim["batch_size"])
+    epochs = int(optim["epochs"])
+    bs = int(optim["batch_size"])
     use_amp = bool(optim["amp"] and torch.cuda.is_available())
-    lr      = float(optim["lr"])
+    lr = float(optim["lr"])
 
     # ------------- DataLoader kwargs -------------
     dl_kwargs = dict(
-        num_workers          = int(data["num_workers"]),
-        pin_memory           = bool(data["pin_memory"]),
-        persistent_workers   = bool(data["persistent_workers"]),
-        prefetch_factor      = data["prefetch_factor"],
-        drop_last            = True,
-        pin_memory_device    = data.get("pin_memory_device", "cuda"),
-        timeout              = 0,
+        num_workers = int(data["num_workers"]),
+        pin_memory = bool(data["pin_memory"]),
+        persistent_workers = bool(data["persistent_workers"]),
+        prefetch_factor = data["prefetch_factor"],
+        drop_last = True,
+        pin_memory_device = data.get("pin_memory_device", "cuda"),
+        timeout = 0,
     )
     mp_ctx = _get_mp_ctx()
     if mp_ctx is not None and dl_kwargs["num_workers"] > 0:
@@ -291,9 +310,9 @@ def run_continual(
         dl_kwargs["balance_bins"] = int(bb)
         dl_kwargs["balance_smooth_eps"] = float(data.get("balance_smooth_eps", 1e-3))
 
-    device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_fn = torch.nn.MSELoss()
-    model   = make_model_fn(tfm)
+    model = make_model_fn(tfm)
     model_lbl = _model_label(model, tfm)
 
     method = cont["method"].lower()
@@ -305,21 +324,18 @@ def run_continual(
 
     def _apply_log_section(obj, key: str):
         sect = log_root.get(key, {}) or {}
-
         # Aliases universales (no rompen nada; conviven con las claves originales)
         if 'verbose' in sect:
             for attr in ('inner_verbose', 'activity_verbose', 'trace_verbose', 'verbose'):
                 if hasattr(obj, attr):
                     try: setattr(obj, attr, bool(sect['verbose']))
                     except Exception: pass
-
         if 'every' in sect:
             ev = int(sect['every'])
             for attr in ('inner_every', 'activity_every', 'trace_every', 'log_every'):
                 if hasattr(obj, attr):
                     try: setattr(obj, attr, ev)
                     except Exception: pass
-
         # Claves específicas (p.ej. fisher_verbose) siguen funcionando
         for k, v in sect.items():
             try: setattr(obj, k, v)
@@ -350,12 +366,12 @@ def run_continual(
         cc_ver = _pkg_version("codecarbon")
     except Exception:
         cc_ver = None
-    tele_cfg   = (cfg.get("logging", {}) or {}).get("telemetry", {}) or {}
-    use_cc     = bool(tele_cfg.get("codecarbon", False))
+    tele_cfg = (cfg.get("logging", {}) or {}).get("telemetry", {}) or {}
+    use_cc = bool(tele_cfg.get("codecarbon", False))
     cc_offline = bool(tele_cfg.get("offline", True))
     cc_country = tele_cfg.get("country_iso_code") or os.getenv("CODECARBON_COUNTRY_ISO_CODE", None)
-    cc_period  = int(tele_cfg.get("measure_power_secs", 15))
-    cc_loglvl  = str(tele_cfg.get("log_level", "warning")).lower()
+    cc_period = int(tele_cfg.get("measure_power_secs", 15))
+    cc_loglvl = str(tele_cfg.get("log_level", "warning")).lower()
     try:
         logging.getLogger("codecarbon").setLevel(getattr(logging, cc_loglvl.upper(), logging.WARNING))
     except Exception:
@@ -379,6 +395,7 @@ def run_continual(
         "cc_period": cc_period,
         "cc_loglvl": cc_loglvl,
     })
+
     t_start = _time.time()
     cc_context = carbon_tracker_ctx(
         out_dir,
@@ -399,9 +416,9 @@ def run_continual(
         tracker_ref = _cc
 
         es_pat = optim.get("es_patience", None)
-        es_md  = optim.get("es_min_delta", None)
+        es_md = optim.get("es_min_delta", None)
         es_pat = int(es_pat) if es_pat is not None else None
-        es_md  = float(es_md) if es_md is not None else 0.0
+        es_md = float(es_md) if es_md is not None else 0.0
 
         tcfg = TrainConfig(
             epochs=epochs,
@@ -414,8 +431,8 @@ def run_continual(
         )
 
         # Preparar modelo/device
-        device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model   = model.to(device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device)
 
         for i, t in enumerate(task_list, start=1):
             name = t["name"]
@@ -440,7 +457,7 @@ def run_continual(
                 try:
                     set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
                     used_rt = True
-                    if verbose: print("  runtime encode: ON (GPU)")
+                    if verbose: print(" runtime encode: ON (GPU)")
                 except Exception:
                     used_rt = False
 
@@ -552,7 +569,7 @@ def run_continual(
                     "encoder": encoder,
                     "T": T,
                     "gain": gain,
-                    "batch_size": bs,   # mantenemos B del preset
+                    "batch_size": bs, # mantenemos B del preset
                     "epochs": epochs,
                     "lr": lr,
                     "amp": use_amp,
@@ -569,6 +586,7 @@ def run_continual(
             te_mse, te_mae = _eval_with_fallback(te, model, loss_fn, device=device, use_amp=use_amp)
             results[name] = {"test_mse": te_mse, "test_mae": te_mae}
             seen.append((name, te))
+
             for pname, p_loader in seen[:-1]:
                 p_mse, p_mae = _eval_with_fallback(p_loader, model, loss_fn, device=device, use_amp=use_amp)
                 results[pname][f"after_{name}_mse"] = p_mse
@@ -592,7 +610,7 @@ def run_continual(
             if used_rt:
                 try:
                     set_encode_runtime(None)
-                    if verbose: print("  runtime encode: OFF")
+                    if verbose: print(" runtime encode: OFF")
                 except Exception:
                     pass
 
@@ -614,7 +632,7 @@ def run_continual(
     # --- Salidas finales ---
     _safe_write(out_dir / "continual_results.json", results)
 
-    names, mat = _build_eval_matrix(results)  # matriz MAE
+    names, mat = _build_eval_matrix(results) # matriz MAE
     eval_mat = {"tasks": names, "mae_matrix": _nan_to_none_matrix(mat)}
     _safe_write(out_dir / "eval_matrix.json", eval_mat)
 
@@ -635,12 +653,13 @@ def run_continual(
     for i, ti in enumerate(names):
         row_vals = [v for v in mat[i] if not (isinstance(v, float) and math.isnan(v))]
         final_mae = float(row_vals[-1]) if row_vals else None
-        best_mae  = float(min(row_vals)) if row_vals else None
+        best_mae = float(min(row_vals)) if row_vals else None
         base = perf_rows[i] if i < len(perf_rows) else {"task_idx": i+1, "task_name": ti}
         base = dict(base)
         base["final_mae"] = final_mae
-        base["best_mae"]  = best_mae
+        base["best_mae"] = best_mae
         perf_rows_enriched.append(base)
+
     if len(perf_rows_enriched) > 0:
         _safe_write(out_dir / "per_task_perf.json", perf_rows_enriched)
         # CSV v1
@@ -673,7 +692,7 @@ def run_continual(
         "method": method_obj.name,
         "encoder": encoder,
         "T": T,
-        "batch_size": bs,  # del preset
+        "batch_size": bs, # del preset
         "amp": use_amp,
         "seed": seed,
         "model": _model_label(model, tfm),
@@ -725,9 +744,9 @@ def run_continual(
             str(run_row["encoder"]),
             str(run_row["model"]),
             str(run_row["seed"]),
-            "" if run_row["c2_final_mae"]   is None else f"{run_row['c2_final_mae']:.8f}",
+            "" if run_row["c2_final_mae"] is None else f"{run_row['c2_final_mae']:.8f}",
             "" if run_row["avg_forget_rel"] is None else f"{run_row['avg_forget_rel']:.8f}",
-            "" if run_row["emissions_kg"]   is None else f"{float(run_row['emissions_kg']):.6f}",
+            "" if run_row["emissions_kg"] is None else f"{float(run_row['emissions_kg']):.6f}",
             f"{float(run_row['elapsed_sec']):.3f}" if run_row["elapsed_sec"] is not None else "",
         ]),
         encoding="utf-8"
@@ -769,25 +788,25 @@ def reevaluate_only(
     out_dir = Path(out_dir)
     data = cfg["data"]; optim = cfg["optim"]
 
-    encoder  = str(data["encoder"])
-    T        = int(data["T"])
-    gain     = float(data["gain"])
-    seed     = int(data.get("seed", 42))
-    bs       = int(optim["batch_size"])
+    encoder = str(data["encoder"])
+    T = int(data["T"])
+    gain = float(data["gain"])
+    seed = int(data.get("seed", 42))
+    bs = int(optim["batch_size"])
 
-    device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model   = make_model_fn(tfm).to(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = make_model_fn(tfm).to(device)
     loss_fn = torch.nn.MSELoss()
 
     # Preconstruir loaders de TEST por tarea
     dl_kwargs = dict(
-        num_workers          = int(data["num_workers"]),
-        pin_memory           = bool(data["pin_memory"]),
-        persistent_workers   = False,
-        prefetch_factor      = data["prefetch_factor"],
-        drop_last            = False,
-        pin_memory_device    = data.get("pin_memory_device", "cuda"),
-        timeout              = 0,
+        num_workers = int(data["num_workers"]),
+        pin_memory = bool(data["pin_memory"]),
+        persistent_workers = False,
+        prefetch_factor = data["prefetch_factor"],
+        drop_last = False,
+        pin_memory_device = data.get("pin_memory_device", "cuda"),
+        timeout = 0,
     )
     tests: List[Tuple[str, Any]] = []
     for i, t in enumerate(task_list, start=1):
@@ -841,8 +860,8 @@ def reevaluate_only(
     for i, ti in enumerate(names):
         row_vals = [v for v in mat[i] if not (isinstance(v, float) and math.isnan(v))]
         final_mae = float(row_vals[-1]) if row_vals else None
-        best_mae  = float(min(row_vals)) if row_vals else None
-        test_mae  = float(mat[i][i]) if not (isinstance(mat[i][i], float) and math.isnan(mat[i][i])) else None
+        best_mae = float(min(row_vals)) if row_vals else None
+        test_mae = float(mat[i][i]) if not (isinstance(mat[i][i], float) and math.isnan(mat[i][i])) else None
         perf_rows.append({
             "task_idx": i+1,
             "task_name": ti,
