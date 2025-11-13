@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import Optional, Tuple, Dict, List, Any, Union
+
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+
 from .base import BaseMethod
+
 
 def _resolve_modules_by_name(model: nn.Module, name_substr: str) -> List[tuple[str, nn.Module]]:
     out: List[tuple[str, nn.Module]] = []
@@ -13,6 +16,7 @@ def _resolve_modules_by_name(model: nn.Module, name_substr: str) -> List[tuple[s
         if low in n.lower():
             out.append((n, m))
     return out
+
 
 def _norm_scale_clip(sc: Any) -> Tuple[float, float]:
     if sc is None: return (0.5, 2.0)
@@ -24,15 +28,23 @@ def _norm_scale_clip(sc: Any) -> Tuple[float, float]:
     except Exception:
         return (0.5, 2.0)
 
+
 def _first_tensor(x) -> Optional[torch.Tensor]:
     if isinstance(x, torch.Tensor): return x
     if isinstance(x, (tuple, list)) and x:
         return x[0] if isinstance(x[0], torch.Tensor) else None
+    if isinstance(x, dict):
+        for k in ("logits", "pred", "y_hat", "output", "out"):
+            v = x.get(k, None)
+            if isinstance(v, torch.Tensor):
+                return v
     return None
+
 
 class AS_SNN(BaseMethod):
     """
     Regularización de actividad con gradiente (por-capa) + synaptic scaling opcional.
+    Robusta a medir actividad como escalar (por capa) o vector (por canal).
     """
     name = "as-snn"
 
@@ -42,8 +54,8 @@ class AS_SNN(BaseMethod):
         lambda_a: float = 2.5,
         gamma_ratio: float = 0.5,
         ema: float = 0.9,
-        penalty_mode: str = "l1",
-        measure_at: Optional[str] = None,
+        penalty_mode: str = "l1",      # "l1" | "l2"
+        measure_at: Optional[str] = None,  # "modules" | "input" | "both"
         attach_to: Optional[str] = None,
         do_synaptic_scaling: bool = False,
         scale_clip: Union[float, Tuple[float, float], List[float]] = (0.5, 2.0),
@@ -89,16 +101,21 @@ class AS_SNN(BaseMethod):
 
         self._device: Optional[torch.device] = None
         self._batch_penalties: List[torch.Tensor] = []
+
+        # Estado “input”
         self._alpha_in_ema: Optional[torch.Tensor] = None
         self._alpha_in_last: Optional[torch.Tensor] = None
+
+        # Estado por capa (dinámico: escalar o vector)
         self._layer_stats: Dict[str, Dict[str, torch.Tensor | nn.Module]] = {}
         self._pre_hook_handle: Optional[torch.utils.hooks.RemovableHandle] = None
         self._fw_handles: List[torch.utils.hooks.RemovableHandle] = []
+
         self.activity_verbose = bool(activity_verbose)
         self.activity_every = int(activity_every)
         self._batch_idx = 0
 
-    # helpers + hooks (idéntico a tu versión anterior) ...
+    # helpers + hooks
     @staticmethod
     def _as_float_unit(x: torch.Tensor) -> torch.Tensor:
         if not x.dtype.is_floating_point: x = x.float()
@@ -107,16 +124,25 @@ class AS_SNN(BaseMethod):
     def _maybe_on_device(self, t: torch.Tensor) -> None:
         if self._device is None: self._device = t.device
 
-    def _ensure_layer_entry(self, name: str, device: torch.device, init_val: torch.Tensor) -> None:
-        if name not in self._layer_stats:
+    def _ensure_layer_entry(self, name: str, device: torch.device, init_like: torch.Tensor) -> None:
+        """Asegura que alpha_ema/alpha_last existen y tienen misma shape que init_like."""
+        shape = tuple(init_like.shape)
+        st = self._layer_stats.get(name)
+        if st is None:
             self._layer_stats[name] = {
-                "alpha_ema": init_val.detach().clone().to(device),
-                "alpha_last": init_val.detach().clone().to(device),
+                "alpha_ema": torch.zeros_like(init_like, device=device),
+                "alpha_last": torch.zeros_like(init_like, device=device),
                 "module": None,
             }
-        else:
-            for k in ("alpha_ema", "alpha_last"):
-                self._layer_stats[name][k] = self._layer_stats[name][k].to(device)  # type: ignore[index]
+            return
+
+        for k in ("alpha_ema", "alpha_last"):
+            tk = st.get(k)
+            if not isinstance(tk, torch.Tensor) or tuple(tk.shape) != shape or tk.device != device:
+                st[k] = torch.zeros_like(init_like, device=device)  # type: ignore[index]
+            else:
+                # nada; ya está bien dimensionado
+                pass
 
     def _phi(self, a: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
         return (a - gamma).pow(2) if self.penalty_mode == "l2" else torch.abs(a - gamma)
@@ -129,9 +155,10 @@ class AS_SNN(BaseMethod):
         elif isinstance(inputs, torch.Tensor):
             x = inputs
         if x is None or not isinstance(x, torch.Tensor): return
+
         self._maybe_on_device(x); device = x.device
         if self.measure_at in ("input", "both"):
-            a_now = self._as_float_unit(x).mean()
+            a_now = self._as_float_unit(x).mean()  # escalar
             if self._alpha_in_ema is None:
                 self._alpha_in_ema = a_now.detach().clone().to(device)
                 self._alpha_in_last = a_now.detach().clone().to(device)
@@ -139,7 +166,9 @@ class AS_SNN(BaseMethod):
                 self._alpha_in_ema.mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema))
                 self._alpha_in_last.copy_(a_now.detach())
             gamma = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
-            self._batch_penalties.append(self.lambda_a * self._phi(a_now, gamma))
+            pen = self.lambda_a * self._phi(a_now, gamma)  # escalar
+            self._batch_penalties.append(pen)
+
         self._batch_idx += 1
         if self.activity_verbose and (self._batch_idx % max(1, self.activity_every)) == 0:
             try:
@@ -153,12 +182,38 @@ class AS_SNN(BaseMethod):
             y = _first_tensor(output) if not isinstance(output, torch.Tensor) else output
             if y is None: return
             self._maybe_on_device(y); device = y.device
-            a_now = self._as_float_unit(y).mean()
-            self._ensure_layer_entry(name, device, a_now)
-            self._layer_stats[name]["alpha_ema"].mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema))  # type: ignore[index]
-            self._layer_stats[name]["alpha_last"].copy_(a_now.detach())  # type: ignore[index]
-            gamma = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
-            self._batch_penalties.append(self.lambda_a * self._phi(a_now, gamma))
+
+            # Permite escalar (por capa) o vector (por canal) según lo que devuelva tu forward
+            # Si tu forward produce (B, N, ...) esto dará vector N; si produce cualquier otra cosa -> escalar.
+            a_raw = self._as_float_unit(y)
+            if a_raw.ndim >= 2:
+                # media sobre batch y espacial -> vector por canal
+                dims = (0,) + tuple(range(2, a_raw.ndim))
+                a_now = a_raw.mean(dim=dims)
+            else:
+                a_now = a_raw.mean()  # escalar
+
+            # Estado dimensionado como a_now
+            self._ensure_layer_entry(name, device, a_now.detach())
+            st = self._layer_stats[name]
+
+            # Mover/ajustar dispositivos si hiciera falta
+            for k in ("alpha_ema", "alpha_last"):
+                tk = st[k]  # type: ignore[index]
+                if isinstance(tk, torch.Tensor) and tk.device != device:
+                    st[k] = tk.to(device=device, non_blocking=True)  # type: ignore[index]
+
+            # EMA
+            st["alpha_ema"].mul_(self.ema).add_(a_now.detach(), alpha=(1.0 - self.ema))  # type: ignore[index]
+            st["alpha_last"].copy_(a_now.detach())  # type: ignore[index]
+
+            # Penalización → SIEMPRE escalar (para sumar con la loss base sin broadcasting)
+            gamma = torch.full_like(a_now, self.gamma_ratio) if a_now.ndim > 0 else torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
+            pen = self.lambda_a * self._phi(a_now, gamma)
+            if pen.ndim > 0:
+                pen = pen.mean()
+            self._batch_penalties.append(pen)
+
         return _hook
 
     # API BaseMethod
@@ -173,14 +228,18 @@ class AS_SNN(BaseMethod):
                 for n, m in model.named_modules():
                     if isinstance(m, (nn.Conv2d, nn.Linear)):
                         modules_to_hook.append((n, m))
+
             registered = set()
             for name, mod in modules_to_hook:
-                if mod in registered: continue
+                if mod in registered: 
+                    continue
                 h = mod.register_forward_hook(self._make_forward_hook(name), with_kwargs=False)
                 self._fw_handles.append(h)
+
+                # Pre-crea entrada con escalar; si luego vemos vector, se re-dimensiona dinámicamente
                 p0 = next(mod.parameters(), None)
                 dev = p0.device if p0 is not None else (self._device or torch.device("cpu"))
-                self._ensure_layer_entry(name, dev, torch.zeros((), device=dev))
+                self._ensure_layer_entry(name, dev, torch.zeros((), device=dev))  # escalar por defecto
                 self._layer_stats[name]["module"] = mod  # type: ignore[index]
                 registered.add(mod)
 
@@ -188,18 +247,29 @@ class AS_SNN(BaseMethod):
         if not self._batch_penalties:
             dev = self._device if self._device is not None else torch.device("cpu")
             return torch.zeros((), dtype=torch.float32, device=dev)
+        # Lista de escalares → escalar
         return torch.stack(self._batch_penalties).sum()
 
     @torch.no_grad()
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
-        if not self.do_synaptic_scaling: return
+        if not self.do_synaptic_scaling:
+            return
         lo, hi = self.scale_clip
         for name, stats in self._layer_stats.items():
             alpha_ema = stats.get("alpha_ema", None)
             mod = stats.get("module", None)
-            if alpha_ema is None or mod is None or not hasattr(mod, "weight"): continue
-            a = float(alpha_ema.item())
-            if a <= 0.0: continue
+            if alpha_ema is None or mod is None or not hasattr(mod, "weight"):
+                continue
+
+            # Usamos el promedio global de alpha_ema (soporta escalar o vector)
+            if isinstance(alpha_ema, torch.Tensor):
+                a = float(alpha_ema.mean().item())
+            else:
+                continue
+
+            if a <= 0.0: 
+                continue
+
             s_nominal = self.gamma_ratio / max(a, self.eps)
             s = float(max(lo, min(hi, s_nominal)))
             try:
@@ -220,7 +290,7 @@ class AS_SNN(BaseMethod):
                 except Exception: pass
             self._fw_handles.clear()
 
-    # introspección (igual que tu versión)
+    # introspección
     def get_activity_state(self) -> dict:
         out = {
             "gamma_ratio": self.gamma_ratio,
@@ -236,9 +306,12 @@ class AS_SNN(BaseMethod):
         out["input_alpha_last"] = None if self._alpha_in_last is None else float(self._alpha_in_last.item())
         layers = {}
         for name, st in self._layer_stats.items():
+            ae = st.get("alpha_ema")
+            al = st.get("alpha_last")
             layers[name] = {
-                "alpha_ema": float(st["alpha_ema"].item()) if isinstance(st.get("alpha_ema"), torch.Tensor) else None,  # type: ignore[index]
-                "alpha_last": float(st["alpha_last"].item()) if isinstance(st.get("alpha_last"), torch.Tensor) else None,  # type: ignore[index]
+                "alpha_ema_mean": float(ae.mean().item()) if isinstance(ae, torch.Tensor) else None,  # type: ignore[arg-type]
+                "alpha_last_mean": float(al.mean().item()) if isinstance(al, torch.Tensor) else None,  # type: ignore[arg-type]
+                "shape": tuple(ae.shape) if isinstance(ae, torch.Tensor) else (),
             }
         out["layers"] = layers
         return out

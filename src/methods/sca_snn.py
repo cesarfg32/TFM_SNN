@@ -8,8 +8,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from .base import BaseMethod
-from src.nn_io import _forward_with_cached_orientation  # <<< clave: orientación consistente
-
+from src.nn_io import _forward_with_cached_orientation  # orientación consistente
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
@@ -32,13 +31,15 @@ class SCAConfig:
     habit_decay: float = 0.99
     soft_mask_temp: float = 0.0
 
+    # NUEVO: objetivo de fracción de activas (0<r<1) — si se define, ajusta umbral por cuantil
+    target_active_frac: Optional[float] = None
+
     # logging
     verbose: bool = False
     log_every: int = 400
 
     # compat temporal
     T: Optional[int] = None
-
 
 # ------------------ utilidades de forma/similitud ------------------
 def _find_first_linear(m: nn.Module) -> Optional[nn.Module]:
@@ -47,7 +48,6 @@ def _find_first_linear(m: nn.Module) -> Optional[nn.Module]:
             return mod
     return None
 
-
 def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
     cur = m
     for p in path.split("."):
@@ -55,7 +55,6 @@ def _get_by_path(m: nn.Module, path: str) -> Optional[nn.Module]:
             return None
         cur = getattr(cur, p)
     return cur if isinstance(cur, nn.Module) else None
-
 
 def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tuple[torch.Tensor, tuple[int, ...], bool]:
     """Normaliza a (T,B,N) para aplicar máscara por neurona."""
@@ -85,7 +84,6 @@ def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tu
 
     return y.contiguous(), orig, False
 
-
 def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, flatten_spatial: bool) -> torch.Tensor:
     yTBN = yTBN.contiguous()
     if len(orig_shape) == 2:
@@ -98,7 +96,6 @@ def _from_TBN(yTBN: torch.Tensor, orig_shape: tuple[int, ...], need_back: bool, 
         return yTBN
     return yTBN
 
-
 def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Tensor:
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
     y = y.clamp(min=lo, max=hi)
@@ -107,14 +104,12 @@ def _bin_index(y: torch.Tensor, lo: float, hi: float, num_bins: int) -> torch.Te
     idx = torch.floor(t * float(num_bins)).to(torch.int64)
     return idx.clamp_(0, num_bins - 1).contiguous()
 
-
 def _row_normalize_pos(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     x = torch.relu(x)
     s = x.sum(dim=1, keepdim=True)
     s = torch.clamp(s, min=eps)
     return x / s
-
 
 def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0)
@@ -126,12 +121,10 @@ def _kl_symmetric(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8) -> torch.
     out = 0.5 * (kl_pq + kl_qp)
     return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
-
 def _similarity_from_kl(kl_vals: torch.Tensor) -> float:
     s = (1.0 / (1.0 + kl_vals))
     s = torch.clamp(s, 0.0, 1.0)
     return float(s.mean().item())
-
 
 def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | None = None) -> torch.Tensor:
     idx = torch.nan_to_num(idx, nan=0.0, posinf=0.0, neginf=0.0)
@@ -145,14 +138,12 @@ def _bincount_safe(idx: torch.Tensor, n_bins: int, *, weights: torch.Tensor | No
     weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
     return torch.bincount(idx, weights=weights, minlength=n_bins)
 
-
 def _topk_safe(score: torch.Tensor, k: int) -> torch.Tensor:
     s = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
     k = max(1, int(k))
     if k >= s.numel():
         return torch.arange(s.numel(), device=s.device)
     return torch.topk(s, k=k, largest=True, sorted=False).indices
-
 
 def _to_single_worker_loader_like(loader: DataLoader) -> DataLoader:
     """Copia un DataLoader con num_workers=0 y sin pin/persistentes."""
@@ -173,13 +164,12 @@ def _to_single_worker_loader_like(loader: DataLoader) -> DataLoader:
     except Exception:
         return loader
 
-
 # ---------------------------- método ----------------------------
 class SCA_SNN(BaseMethod):
     name = "sca-snn"
 
     def __init__(self, *, device: Optional[torch.device] = None, loss_fn: Optional[nn.Module] = None, **kw):
-        # Ahora inyectamos device/loss_fn de forma limpia
+        # Inyectamos device/loss_fn de forma limpia
         super().__init__(device=device, loss_fn=loss_fn)
         self.cfg = SCAConfig(**{k: v for k, v in kw.items() if k in SCAConfig.__annotations__})
         self.name = (
@@ -235,7 +225,7 @@ class SCA_SNN(BaseMethod):
         Soporta (B,N), (T,B,N), (B,T,N), (B,N,T), (B,C,H,W), (T,B,C,H,W), etc.
         - Promedia en T si existe.
         - Si flatten_spatial=True, promedia HxW antes de aplanar.
-        - Si no se puede inferir B, degrada con un vector medio repetido B veces (sin lanzar).
+        - Si no se puede inferir B, degrada con un vector medio repetido.
         """
         t = out
         if not torch.is_tensor(t):
@@ -271,7 +261,7 @@ class SCA_SNN(BaseMethod):
         # Fallback (benigno)
         if not self._warned_shape_once:
             print(f"[SCA] WARNING: no puedo inferir (B={B}) desde shape={tuple(out.shape)}; "
-                  f"usaré media global repetida (degradación suave).")
+                  f"usaré media global repetida.")
             self._warned_shape_once = True
 
         v = out
@@ -299,13 +289,24 @@ class SCA_SNN(BaseMethod):
             dev_target = self._ensure_target_device()
             self._setup_per_neuron_state(N, device=dev_target)
 
-        rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
+        # métrica de reutilización acumulada
         Rn = torch.sigmoid(self._R)  # (N,)
+        rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
+
+        # NUEVO: si target_active_frac está definido, ajusta umbral por cuantil de Rn
+        thr = rho
+        taf = self.cfg.target_active_frac
+        if isinstance(taf, float) and 0.0 < taf < 1.0:
+            try:
+                q = torch.quantile(Rn.detach(), 1.0 - taf)
+                thr = max(float(q.item()), rho)  # respeta límite inferior basado en sim_min
+            except Exception:
+                thr = rho
 
         if self.cfg.soft_mask_temp > 0.0:
-            m = torch.sigmoid((Rn - rho) / max(1e-6, self.cfg.soft_mask_temp)).view(1, 1, N)
+            m = torch.sigmoid((Rn - thr) / max(1e-6, self.cfg.soft_mask_temp)).view(1, 1, N)
         else:
-            m = (Rn > rho).to(yTBN.dtype).view(1, 1, N)
+            m = (Rn > thr).to(yTBN.dtype).view(1, 1, N)
 
         if m.device != yTBN.device:
             m = m.to(yTBN.device, non_blocking=True)
@@ -313,7 +314,7 @@ class SCA_SNN(BaseMethod):
         yTBN = (yTBN * m).contiguous()
         yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # --- LOG CONTROLADO POR logging.sca-snn.verbose / log_every ---
+        # --- LOG CONTROLADO ---
         if bool(getattr(self, "verbose", self.cfg.verbose)):
             self._step += 1
             every = max(10, int(getattr(self, "log_every", self.cfg.log_every)))
@@ -321,7 +322,7 @@ class SCA_SNN(BaseMethod):
                 try:
                     active = 100.0 * float(m.mean().item())
                     print(f"[SCA] step={self._step} | {self._attached_name} | sim_min={self._sim_min:.3f} "
-                          f"| rho={(self.cfg.beta - float(self._sim_min) + self.cfg.bias):.3f} | act≈{active:.1f}%")
+                          f"| thr={thr:.3f} | act≈{active:.1f}%")
                 except Exception:
                     pass
 
@@ -374,13 +375,11 @@ class SCA_SNN(BaseMethod):
 
             # Hook temporal: acumula TODAS las salidas de la capa objetivo a lo largo de T
             grab: Dict[str, List[torch.Tensor]] = {"outs": []}
-
             def _cap_hook(_m, _inp, out):
                 if torch.is_tensor(out):
                     grab["outs"].append(out.detach())
 
             tmp_handle = self._target.register_forward_hook(_cap_hook, with_kwargs=False)
-
             cnt_per_bin = [0 for _ in range(num_bins)]
             sum_per_bin = [torch.zeros(self._N, dtype=torch.float32, device=device) for _ in range(num_bins)]
 
@@ -395,7 +394,7 @@ class SCA_SNN(BaseMethod):
                     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0).to(torch.float32).contiguous()
                     B = int(y.shape[0])
 
-                    # Ejecuta forward con orientación y dtype consistentes, sin AMP
+                    # Forward con orientación consistente, sin AMP
                     _ = _forward_with_cached_orientation(
                         model=model, x=x, y=y,
                         device=device, use_amp=False,
@@ -411,12 +410,11 @@ class SCA_SNN(BaseMethod):
                         raw = outs[0]
                     else:
                         try:
-                            # Cada out esperado como (B, N) → (T, B, N)
-                            raw = torch.stack(outs, dim=0).contiguous()
+                            raw = torch.stack(outs, dim=0).contiguous()  # (T,B,N...) esperado
                         except Exception:
                             raw = outs[-1]
 
-                    # Normaliza robusto a (B,N) promediando T si procede
+                    # Normaliza a (B,N) promediando T si procede
                     F = self._norm_BN(raw, B=B)  # (B,N)
                     if F.device != device:
                         F = F.to(device, non_blocking=True)
@@ -554,14 +552,13 @@ class SCA_SNN(BaseMethod):
         self._suspend_mask = False
         self._sim_min = self._estimate_similarity_min(anchors_curr)
 
-        # --- LOG CONTROLADO POR logging.sca-snn.verbose ---
+        # --- LOG CONTROLADO ---
         if bool(getattr(self, "verbose", self.cfg.verbose)):
             print(f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
                   f"bins={self.cfg.num_bins} | sim_min={self._sim_min:.3f}")
-            if True:  # mantener bloque y gating externo
-                print(f"[SCA] probe | N={self._N} | anchor_batches={self.cfg.anchor_batches} | "
-                      f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
-                      f"habit_decay={self.cfg.habit_decay}")
+            print(f"[SCA] probe | N={self._N} | anchor_batches={self.cfg.anchor_batches} | "
+                  f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
+                  f"habit_decay={self.cfg.habit_decay} | target_active_frac={self.cfg.target_active_frac}")
 
         # Activa el hook de gating
         if self._hook_handle is None:
@@ -586,18 +583,14 @@ class SCA_SNN(BaseMethod):
         self._suspend_mask = False
         self._anchors_prev.append(anchors.detach().clone())
 
-        # --- LOG CONTROLADO POR logging.sca-snn.verbose ---
+        # --- LOG CONTROLADO ---
         if bool(getattr(self, "verbose", self.cfg.verbose)):
             if self._R is not None and self._N:
-                rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
-                act_frac = float((torch.sigmoid(self._R) > rho).float().mean().item())
+                rho = self.cfg.beta - self._sim_min + self.cfg.bias
+                Rn = torch.sigmoid(self._R)
+                act_frac = float((Rn > rho).float().mean().item())
                 print(f"[SCA] after_task: act≈{100.0*act_frac:.1f}% | rho={rho:.3f} | sim_min={self._sim_min:.3f}")
-
-            used = None
-            if self._R is not None:
-                thr = (self.cfg.beta - self._sim_min + self.cfg.bias)
-                used = int((torch.sigmoid(self._R) > thr).sum().item())
-            print(f"[SCA] after_task: anchors guardadas. N={self._N} | activos≈{used if used is not None else '-'}")
+            print(f"[SCA] after_task: anchors guardadas. N={self._N}")
 
     def detach(self) -> None:
         if self._hook_handle is not None:
@@ -633,5 +626,6 @@ class SCA_SNN(BaseMethod):
             "habit_decay": float(self.cfg.habit_decay),
             "num_bins": int(self.cfg.num_bins),
             "anchor_batches": int(self.cfg.anchor_batches),
+            "target_active_frac": (None if self.cfg.target_active_frac is None else float(self.cfg.target_active_frac)),
         }
         return out

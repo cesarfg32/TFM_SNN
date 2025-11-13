@@ -1,4 +1,3 @@
-# src/eval.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import Tuple, Dict, Optional
@@ -43,17 +42,36 @@ def eval_loader(
     n_val_batches = 0
     phase_hint: Dict[str, Optional[str]] = {"val": None}
 
+    # autocast sólo si CUDA
+    dev_type = "cuda" if device.type == "cuda" else "cpu"
+    amp_enabled = bool(use_amp and device.type == "cuda")
+
     for x, y in loader:
+        # y al device
         y = y.to(device, non_blocking=True)
+
+        # forward robusto + orientación temporal coherente
         y_hat = _forward_with_cached_orientation(
-            model=model, x=x, y=y, device=device, use_amp=bool(use_amp), phase_hint=phase_hint, phase="val"
+            model=model, x=x, y=y, device=device, use_amp=amp_enabled,
+            phase_hint=phase_hint, phase="val"
         )
-        y_aligned = _align_target_shape(y_hat, y).to(device=y_hat.device, dtype=y_hat.dtype, non_blocking=True)
-        with autocast("cuda", enabled=bool(use_amp)):
+
+        # alinea y a la forma/tipo de y_hat
+        y_aligned = _align_target_shape(y_hat, y).to(
+            device=y_hat.device, dtype=y_hat.dtype, non_blocking=True
+        )
+
+        # pérdida (misma semántica, se permite autocast en CUDA)
+        with autocast(dev_type, enabled=amp_enabled):
             v_loss = loss_fn(y_hat, y_aligned)
+
+        # acumulado MSE y MAE por batch
         v_running_mse += float(v_loss.detach().item())
+
+        # mae en FP32 (estable)
         mae_batch = torch.abs(y_hat.to(torch.float32) - y_aligned.to(torch.float32)).mean()
         v_running_mae += float(mae_batch.detach().item())
+
         n_val_batches += 1
 
     mse = v_running_mse / max(1, n_val_batches)

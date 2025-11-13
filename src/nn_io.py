@@ -1,4 +1,3 @@
-# src/nn_io.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 from typing import Any, Dict, Optional, Union
@@ -11,6 +10,9 @@ __all__ = [
     "get_encode_runtime",
     "_forward_with_cached_orientation",
     "_align_target_shape",
+    # alias utilitarios expuestos
+    "move_to_device",
+    "to_float32",
 ]
 
 # ============================================================
@@ -25,6 +27,7 @@ _ENCODE_RUNTIME_CFG: Dict[str, Any] = {
     "gain": None,
     "device": None,
 }
+
 
 def set_encode_runtime(
     enabled: Optional[bool] = None,
@@ -42,21 +45,27 @@ def set_encode_runtime(
       - set_encode_runtime(True/False)
     """
     global _ENCODE_RUNTIME_CFG
+
     if enabled is None and mode is None:
         # llamada tipo set_encode_runtime(None) -> OFF
-        _ENCODE_RUNTIME_CFG.update({"enabled": False, "mode": None, "T": None, "gain": None, "device": None})
+        _ENCODE_RUNTIME_CFG.update(
+            {"enabled": False, "mode": None, "T": None, "gain": None, "device": None}
+        )
         return
 
     if enabled is None:
         enabled = mode is not None
 
-    _ENCODE_RUNTIME_CFG.update({
-        "enabled": bool(enabled),
-        "mode": mode,
-        "T": T,
-        "gain": gain,
-        "device": str(device) if device is not None else None,
-    })
+    _ENCODE_RUNTIME_CFG.update(
+        {
+            "enabled": bool(enabled),
+            "mode": mode,
+            "T": T,
+            "gain": gain,
+            "device": str(device) if device is not None else None,
+        }
+    )
+
 
 def get_encode_runtime(key: Optional[str] = None) -> Any:
     """
@@ -69,7 +78,7 @@ def get_encode_runtime(key: Optional[str] = None) -> Any:
 
 
 # ============================================================
-#  Utilidades internas
+#  Utilidades internas / alias públicos
 # ============================================================
 def _to_device(obj: Any, device: torch.device, non_blocking: bool = True) -> Any:
     if torch.is_tensor(obj):
@@ -81,13 +90,38 @@ def _to_device(obj: Any, device: torch.device, non_blocking: bool = True) -> Any
         return {k: _to_device(v, device, non_blocking) for k, v in obj.items()}
     return obj
 
+
+def move_to_device(obj: Any, device: Union[torch.device, str], non_blocking: bool = True) -> Any:
+    """
+    Alias público de _to_device: mueve tensores (o estructuras de tensores)
+    a un device dado. Útil en otros módulos.
+    """
+    dev = torch.device(device)
+    return _to_device(obj, dev, non_blocking=non_blocking)
+
+
+def to_float32(obj: Any) -> Any:
+    """
+    Convierte tensores (o estructuras) a float32 de forma recursiva.
+    No altera tensores no-flotantes. Útil para estabilizar métricas.
+    """
+    if torch.is_tensor(obj):
+        return obj.float() if obj.dtype.is_floating_point else obj
+    if isinstance(obj, (list, tuple)):
+        typ = type(obj)
+        return typ(to_float32(x) for x in obj)
+    if isinstance(obj, dict):
+        return {k: to_float32(v) for k, v in obj.items()}
+    return obj
+
+
 def _first_tensor(x: Any) -> Optional[torch.Tensor]:
     if torch.is_tensor(x):
         return x
     if isinstance(x, dict):
         # heurística: claves típicas primero
         for key in ("logits", "pred", "y_hat", "output", "out"):
-            v = x.get(key, None)
+            v = x.get(key, None)  # type: ignore[arg-type]
             if torch.is_tensor(v):
                 return v
         for v in x.values():
@@ -102,6 +136,7 @@ def _first_tensor(x: Any) -> Optional[torch.Tensor]:
                 return t
         return None
     return None
+
 
 # -------- Permuta (B,T,...) -> (T,B,...) cuando aplique --------
 def _maybe_BT_to_TB(x: torch.Tensor, B_hint: Optional[int]) -> torch.Tensor:
@@ -136,6 +171,7 @@ def _maybe_BT_to_TB(x: torch.Tensor, B_hint: Optional[int]) -> torch.Tensor:
     # 4D (imágenes): NO permutar (B,C,H,W)
     return x
 
+
 def _bt_to_tb_structure(x: Any, B_hint: Optional[int]) -> Any:
     if torch.is_tensor(x):
         return _maybe_BT_to_TB(x, B_hint)
@@ -164,7 +200,7 @@ def _forward_with_cached_orientation(
     """
     - Mueve x al device.
     - Si detecta (B,T,...) en spikes/secuencias, lo permuta a (T,B,...) (estilo snnTorch).
-    - Ejecuta el forward con autocast opcional.
+    - Ejecuta el forward con autocast opcional (sólo en CUDA).
     - Devuelve SIEMPRE un Tensor (primer tensor de la salida).
     """
     # Normaliza device
@@ -189,7 +225,7 @@ def _forward_with_cached_orientation(
     # Normaliza orientación temporal si aplica
     x_dev = _bt_to_tb_structure(x_dev, B_hint=B_hint)
 
-    # AMP según device
+    # AMP según device (sólo activo si CUDA)
     dev_type = "cuda" if device.type == "cuda" else "cpu"
     amp_enabled = bool(use_amp and device.type == "cuda")
     with torch.amp.autocast(device_type=dev_type, enabled=amp_enabled):

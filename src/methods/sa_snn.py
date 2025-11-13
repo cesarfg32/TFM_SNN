@@ -12,9 +12,9 @@ from .base import BaseMethod
 
 DeviceLike = Union[torch.device, str]
 
+
 @dataclass
 class SASNNConfig:
-    # Dónde enganchar (ruta exacta en named_modules(); "auto" → 1ª Linear, si no 1ª Conv2d)
     attach_to: str = "auto"
     k: float = 8.0
     tau: float = 32.0
@@ -28,11 +28,9 @@ class SASNNConfig:
     reset_counters_each_task: bool = False
     update_on_eval: bool = False
 
+
 class SASNN(BaseMethod):
-    """
-    SA-SNN (Sparse Activation por tracking de actividad).
-    Desacoplado del runner: no registra hooks en __init__, sino en before_task().
-    """
+    """SA-SNN (Sparse Activation por tracking de actividad)."""
     name = "sa-snn"
 
     def __init__(self, *, device: Optional[DeviceLike] = None, loss_fn=None, **kw):
@@ -191,6 +189,8 @@ class SASNN(BaseMethod):
         # registrar hook sólo si no estaba
         if self._hook_handle is None:
             self._hook_handle = self._target.register_forward_hook(self._forward_hook)
+
+        # Importante: NO llamar a self._target(xb). El hook se activará en el forward normal.
 
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
         pass

@@ -1,9 +1,27 @@
 [
-  { "tag": "fast_reh_b3k_rr030", "preset": "fast", "seed": 42, "amp": true,
-    "method": "rehearsal",
-    "method_kwargs": { "buffer_size": 3000, "replay_ratio": 0.30 } },
+  { "tag": "fast3_ewc_l6e8_fb32_ampbf16", "preset": "fast", "seed": 42, "amp": true,
+    "method": "ewc",
+    "method_kwargs": { "lambd": 600000000, "fisher_batches": 32,
+                       "fisher_precision": "amp", "fisher_amp_dtype": "bf16",
+                       "permute_policy": "auto" } },
 
-  { "tag": "fast_reh_b4k_rr025", "preset": "fast", "seed": 42, "amp": true,
-    "method": "rehearsal",
-    "method_kwargs": { "buffer_size": 4000, "replay_ratio": 0.25 } }
+  { "tag": "fast3_as_gr050_lam040_att_f6", "preset": "fast", "seed": 42, "amp": true,
+    "method": "as-snn",
+    "method_kwargs": { "gamma_ratio": 0.5, "lambda_a": 0.4,
+                       "penalty_mode": "l1", "attach_to": "f6",
+                       "activity_verbose": false } },
+
+  { "tag": "fast3_sa_k0p10_tau24_vt125_f6", "preset": "fast", "seed": 42, "amp": true,
+    "method": "sa-snn",
+    "method_kwargs": { "attach_to": "f6", "k": 0.10, "tau": 24.0, "vt_scale": 1.25,
+                       "th_min": 1.0, "th_max": 2.0, "p": 2000000,
+                       "flatten_spatial": false, "assume_binary_spikes": false,
+                       "reset_counters_each_task": true, "update_on_eval": false } },
+
+  { "tag": "fast3_sca_b80_bias012_t012_ab12_f1_f6", "preset": "fast", "seed": 42, "amp": true,
+    "method": "sca-snn",
+    "method_kwargs": { "attach_to": "f6", "flatten_spatial": true,
+                       "num_bins": 32, "anchor_batches": 12,
+                       "beta": 0.80, "bias": 0.12, "soft_mask_temp": 0.12,
+                       "habit_decay": 0.97, "verbose": false } }
 ]
