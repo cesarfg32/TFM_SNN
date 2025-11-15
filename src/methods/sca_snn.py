@@ -1,23 +1,20 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict
-
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-
 from .base import BaseMethod
-from src.nn_io import _forward_with_cached_orientation # orientación consistente
-
+from src.nn_io import _forward_with_cached_orientation  # orientación consistente
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
 # ------------------------------------------------------------
 @dataclass
 class SCAConfig:
-    attach_to: Optional[str] = None # p.ej. "f6" en PilotNetSNN; None -> primera Linear
+    # Dónde enganchar (por defecto, primera Linear)
+    attach_to: Optional[str] = None            # p.ej. "f6" en PilotNetSNN; None -> primera Linear
     flatten_spatial: bool = True
 
     # Similaridad (anchors)
@@ -28,19 +25,19 @@ class SCAConfig:
     max_per_bin: int = 1024
 
     # Selective reuse (gating)
-    beta: float = 0.5
-    bias: float = 0.0
-    habit_decay: float = 0.99
-    soft_mask_temp: float = 0.0
+    beta: float = 0.5                          # “base reuse” (↑ ⇒ menor umbral)
+    bias: float = 0.0                          # desplazamiento del umbral
+    habit_decay: float = 0.99                  # decaimiento del rastro R
+    soft_mask_temp: float = 0.0                # >0 ⇒ máscara sigmoide suave
 
-    # NUEVO: objetivo de fracción de activas (0<r<1) — si se define, ajusta umbral por cuantil
+    # Control opcional de fracción activa (0<r<1). Si se define, limita a ≤ r activas.
     target_active_frac: Optional[float] = None
 
     # logging
     verbose: bool = False
     log_every: int = 400
 
-    # compat temporal
+    # compat temporal (ayuda a inferir T si el input no lo deja claro)
     T: Optional[int] = None
 
 
@@ -66,20 +63,20 @@ def _to_TBN(y: torch.Tensor, T_hint: Optional[int], flatten_spatial: bool) -> tu
     y = y.contiguous()
     orig = y.shape
 
-    if y.ndim == 2: # (B,N) ó (T,N)
+    if y.ndim == 2:  # (B,N) ó (T,N)
         return y.unsqueeze(0).contiguous(), orig, True
 
-    if y.ndim == 3: # (T,B,N) o (B,T,N) o (B,N,T)
+    if y.ndim == 3:  # (T,B,N) o (B,T,N) o (B,N,T)
         TBN = y
-        if T_hint and y.shape[-1] == T_hint: # (B,N,T) -> (T,B,N)
+        if T_hint and y.shape[-1] == T_hint:       # (B,N,T) -> (T,B,N)
             TBN = y.permute(2, 0, 1).contiguous()
             return TBN, orig, True
-        if T_hint and y.shape[1] == T_hint: # (B,T,N) -> (T,B,N)
+        if T_hint and y.shape[1] == T_hint:        # (B,T,N) -> (T,B,N)
             TBN = y.permute(1, 0, 2).contiguous()
             return TBN, orig, True
         return TBN.contiguous(), orig, False
 
-    if y.ndim == 5: # (T,B,C,H,W) o (B,T,C,H,W)
+    if y.ndim == 5:  # (T,B,C,H,W) o (B,T,C,H,W)
         if T_hint and y.shape[0] != T_hint:
             y = y.permute(1, 0, 2, 3, 4).contiguous()
         T, B, C, H, W = y.shape
@@ -185,7 +182,9 @@ class SCA_SNN(BaseMethod):
     def __init__(self, *, device: Optional[torch.device] = None, loss_fn: Optional[nn.Module] = None, **kw):
         # Inyectamos device/loss_fn de forma limpia
         super().__init__(device=device, loss_fn=loss_fn)
+        # Solo parámetros definidos en SCAConfig
         self.cfg = SCAConfig(**{k: v for k, v in kw.items() if k in SCAConfig.__annotations__})
+
         self.name = (
             f"{self.name}"
             f"_bins{self.cfg.num_bins}"
@@ -195,6 +194,8 @@ class SCA_SNN(BaseMethod):
             f"_ab{self.cfg.anchor_batches}"
             f"_flat{int(self.cfg.flatten_spatial)}"
         )
+
+        # Estado interno
         self._anchors_prev: List[torch.Tensor] = []
         self._target: Optional[nn.Module] = None
         self._hook_handle: Optional[torch.utils.hooks.RemovableHandle] = None
@@ -249,15 +250,15 @@ class SCA_SNN(BaseMethod):
         # Caso directo: (B, N...)
         if t.ndim >= 2 and t.shape[0] == B:
             if t.ndim >= 4 and self.cfg.flatten_spatial:
-                t = t.mean(dim=(-1, -2)) # (B,C)
+                t = t.mean(dim=(-1, -2))  # (B,C)
             return t.view(B, -1)
 
         # Reordenar si B está en otro eje
         if B in t.shape:
             bdim = list(t.shape).index(B)
             perm = [bdim] + [i for i in range(t.ndim) if i != bdim]
-            t = t.permute(*perm).contiguous() # (B, ...)
-            if t.ndim >= 3 and t.shape[1] == self._T_seq: # (B, T, ...)
+            t = t.permute(*perm).contiguous()  # (B, ...)
+            if t.ndim >= 3 and t.shape[1] == self._T_seq:  # (B, T, ...)
                 t = t.mean(dim=1)
             if t.ndim >= 4 and self.cfg.flatten_spatial:
                 t = t.mean(dim=(-1, -2))
@@ -267,25 +268,47 @@ class SCA_SNN(BaseMethod):
         if t.ndim >= 3 and t.shape[0] == self._T_seq:
             if t.ndim >= 3 and t.shape[1] != 0:
                 if t.shape[1] == B:
-                    t = t.mean(dim=0) # (B, ...)
+                    t = t.mean(dim=0)  # (B, ...)
                     if t.ndim >= 3 and self.cfg.flatten_spatial:
                         t = t.mean(dim=(-1, -2))
                     return t.view(B, -1)
 
         # Fallback (benigno)
         if not self._warned_shape_once:
-            print(f"[SCA] WARNING: no puedo inferir (B={B}) desde shape={tuple(out.shape)}; "
-                  f"usaré media global repetida.")
+            print(
+                f"[SCA] WARNING: no puedo inferir (B={B}) desde shape={tuple(out.shape)}; "
+                f"usaré media global repetida."
+            )
             self._warned_shape_once = True
 
         v = out
         if v.ndim >= 3 and self.cfg.flatten_spatial:
-            v = v.mean(dim=tuple(range(2, v.ndim))) # agrega espacial
+            v = v.mean(dim=tuple(range(2, v.ndim)))  # agrega espacial
         if v.ndim >= 2 and v.shape[0] == self._T_seq:
-            v = v.mean(dim=0) # promedia T si va delante
-        v = v.view(-1) if v.ndim == 1 else v.mean(dim=0) # (N,)
+            v = v.mean(dim=0)  # promedia T si va delante
+        v = v.view(-1) if v.ndim == 1 else v.mean(dim=0)  # (N,)
         v = torch.nan_to_num(v.float(), nan=0.0, posinf=0.0, neginf=0.0)
         return v.view(1, -1).repeat(B, 1).contiguous()
+
+    # -------- threshold helper --------
+    def _compute_threshold(self, Rn: torch.Tensor) -> float:
+        # Base: más similitud ⇒ menor umbral
+        rho = float(self.cfg.beta - float(self._sim_min) + self.cfg.bias)
+        # Acotar a (0,1) por seguridad de escala
+        rho = max(1e-6, min(1.0 - 1e-6, rho))
+
+        thr = rho
+        taf = self.cfg.target_active_frac
+        if isinstance(taf, float) and 0.0 < taf < 1.0:
+            try:
+                q = torch.quantile(Rn.detach(), 1.0 - taf)
+                # ⇒ fracción activa ≤ taf, nunca por debajo del piso rho
+                thr = max(float(q.item()), rho)
+            except Exception:
+                pass
+        # clamp final
+        thr = max(1e-6, min(1.0 - 1e-6, float(thr)))
+        return thr
 
     # -------- forward hook: gating --------
     def _forward_hook(self, module: nn.Module, inputs: Tuple[torch.Tensor, ...], out: torch.Tensor):
@@ -304,18 +327,8 @@ class SCA_SNN(BaseMethod):
             self._setup_per_neuron_state(N, device=dev_target)
 
         # métrica de reutilización acumulada
-        Rn = torch.sigmoid(self._R) # (N,)
-        rho = self.cfg.beta - float(self._sim_min) + self.cfg.bias
-
-        # NUEVO: si target_active_frac está definido, ajusta umbral por cuantil de Rn
-        thr = rho
-        taf = self.cfg.target_active_frac
-        if isinstance(taf, float) and 0.0 < taf < 1.0:
-            try:
-                q = torch.quantile(Rn.detach(), 1.0 - taf)
-                thr = max(float(q.item()), rho) # respeta límite inferior basado en sim_min
-            except Exception:
-                thr = rho
+        Rn = torch.sigmoid(self._R)  # (N,)
+        thr = self._compute_threshold(Rn)
 
         if self.cfg.soft_mask_temp > 0.0:
             m = torch.sigmoid((Rn - thr) / max(1e-6, self.cfg.soft_mask_temp)).view(1, 1, N)
@@ -335,8 +348,10 @@ class SCA_SNN(BaseMethod):
             if (self._step % every) == 0:
                 try:
                     active = 100.0 * float(m.mean().item())
-                    print(f"[SCA] step={self._step} | {self._attached_name} | sim_min={self._sim_min:.3f} "
-                          f"| thr={thr:.3f} | act≈{active:.1f}%")
+                    print(
+                        f"[SCA] step={self._step} | {self._attached_name} | "
+                        f"sim_min={self._sim_min:.3f} | thr={thr:.3f} | act≈{active:.1f}%"
+                    )
                 except Exception:
                     pass
 
@@ -356,7 +371,9 @@ class SCA_SNN(BaseMethod):
                 self._Gacc = self._Gacc.to(dev, non_blocking=True)
             if (self._R is not None) and (self._R.device != dev):
                 self._R = self._R.to(dev, non_blocking=True)
-            g_row = grad.pow(2).sum(dim=1).sqrt() # (N_out,)
+
+            # energía por fila
+            g_row = grad.pow(2).sum(dim=1).sqrt()  # (N_out,)
             g_row = torch.nan_to_num(g_row, nan=0.0, posinf=0.0, neginf=0.0)
             self._Gacc.add_(g_row)
 
@@ -425,18 +442,18 @@ class SCA_SNN(BaseMethod):
                         raw = outs[0]
                     else:
                         try:
-                            raw = torch.stack(outs, dim=0).contiguous() # (T,B,N...) esperado
+                            raw = torch.stack(outs, dim=0).contiguous()  # (T,B,N...) esperado
                         except Exception:
                             raw = outs[-1]
 
                     # Normaliza a (B,N) promediando T si procede
-                    F = self._norm_BN(raw, B=B) # (B,N)
+                    F = self._norm_BN(raw, B=B)  # (B,N)
                     if F.device != device:
                         F = F.to(device, non_blocking=True)
                     F = torch.nan_to_num(F.float(), nan=0.0, posinf=0.0, neginf=0.0).contiguous()
 
                     # Binning y acumulación
-                    bidx = _bin_index(y, lo, hi, num_bins) # (B,)
+                    bidx = _bin_index(y, lo, hi, num_bins)  # (B,)
                     for b in range(num_bins):
                         mask = (bidx == b)
                         if mask.any():
@@ -460,9 +477,9 @@ class SCA_SNN(BaseMethod):
                 if was_training:
                     model.train()
 
-            anchors = torch.stack([
-                (sum_per_bin[b] / max(1, cnt_per_bin[b])) for b in range(num_bins)
-            ], dim=0).contiguous() # (num_bins, N)
+            anchors = torch.stack(
+                [(sum_per_bin[b] / max(1, cnt_per_bin[b])) for b in range(num_bins)], dim=0
+            ).contiguous()  # (num_bins, N)
             anchors = torch.nan_to_num(anchors, nan=0.0, posinf=0.0, neginf=0.0)
             anchors = _row_normalize_pos(anchors)
             return anchors
@@ -506,6 +523,7 @@ class SCA_SNN(BaseMethod):
 
         if self._R is not None and self._Gacc is not None:
             with torch.no_grad():
+                # decaimiento
                 self._R.mul_(self.cfg.habit_decay)
                 g = torch.nan_to_num(self._Gacc, nan=0.0, posinf=0.0, neginf=0.0)
                 try:
@@ -514,8 +532,10 @@ class SCA_SNN(BaseMethod):
                     q = torch.tensor(1.0, device=g.device if isinstance(g, torch.Tensor) else dev)
                 if float(q) <= 1e-9:
                     q = torch.tensor(1.0, device=g.device if isinstance(g, torch.Tensor) else dev)
+                # normalización por p95 para que R no explote
                 self._R.add_(g / q)
                 self._Gacc.zero_()
+        # No penaliza la loss explícitamente
         return torch.zeros((), dtype=torch.float32, device=dev)
 
     def before_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
@@ -569,11 +589,15 @@ class SCA_SNN(BaseMethod):
 
         # --- LOG CONTROLADO ---
         if bool(getattr(self, "verbose", self.cfg.verbose)):
-            print(f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
-                  f"bins={self.cfg.num_bins} | sim_min={self._sim_min:.3f}")
-            print(f"[SCA] probe | N={self._N} | anchor_batches={self.cfg.anchor_batches} | "
-                  f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
-                  f"habit_decay={self.cfg.habit_decay} | target_active_frac={self.cfg.target_active_frac}")
+            print(
+                f"[SCA] start | attach={self.cfg.attach_to or 'auto'} -> {self._attached_name} | "
+                f"bins={self.cfg.num_bins} | sim_min={self._sim_min:.3f}"
+            )
+            print(
+                f"[SCA] probe | N={self._N} | anchor_batches={self.cfg.anchor_batches} | "
+                f"beta={self.cfg.beta} | bias={self.cfg.bias} | soft_temp={self.cfg.soft_mask_temp} | "
+                f"habit_decay={self.cfg.habit_decay} | target_active_frac={self.cfg.target_active_frac}"
+            )
 
         # Activa el hook de gating
         if self._hook_handle is None:
@@ -584,7 +608,7 @@ class SCA_SNN(BaseMethod):
 
     def after_task(self, model: nn.Module, train_loader: DataLoader, val_loader: DataLoader) -> None:
         try:
-            _ = self.penalty() # decay + reset Gacc
+            _ = self.penalty()  # decay + reset Gacc
         except Exception:
             pass
 
@@ -598,33 +622,49 @@ class SCA_SNN(BaseMethod):
         self._suspend_mask = False
         self._anchors_prev.append(anchors.detach().clone())
 
-        # --- LOG CONTROLADO ---
+        # --- LOG CONTROLADO (mini-patch: act_vs_rho y act_vs_thr) ---
         if bool(getattr(self, "verbose", self.cfg.verbose)):
             if self._R is not None and self._N:
-                rho = self.cfg.beta - self._sim_min + self.cfg.bias
-                Rn = torch.sigmoid(self._R)
-                act_frac = float((Rn > rho).float().mean().item())
-                print(f"[SCA] after_task: act≈{100.0*act_frac:.1f}% | rho={rho:.3f} | sim_min={self._sim_min:.3f}")
+                # piso por similitud
+                rho = max(1e-6, min(1.0 - 1e-6, self.cfg.beta - self._sim_min + self.cfg.bias))
+                Rn = torch.sigmoid(self._R.detach())
+                thr = self._compute_threshold(Rn)
+
+                act_vs_rho = float((Rn > rho).float().mean().item())
+                act_vs_thr = float((Rn > thr).float().mean().item())
+
+                print(
+                    f"[SCA] after_task: act_vs_rho≈{100.0*act_vs_rho:.1f}% | "
+                    f"act_vs_thr≈{100.0*act_vs_thr:.1f}% | "
+                    f"rho={rho:.3f} | thr={thr:.3f} | sim_min={self._sim_min:.3f}"
+                )
             print(f"[SCA] after_task: anchors guardadas. N={self._N}")
 
     def detach(self) -> None:
         if self._hook_handle is not None:
-            try: self._hook_handle.remove()
-            except Exception: pass
+            try:
+                self._hook_handle.remove()
+            except Exception:
+                pass
             self._hook_handle = None
         if self._model_pre_hook_handle is not None:
-            try: self._model_pre_hook_handle.remove()
-            except Exception: pass
+            try:
+                self._model_pre_hook_handle.remove()
+            except Exception:
+                pass
             self._model_pre_hook_handle = None
         if self._w_grad_hook is not None:
-            try: self._w_grad_hook.remove()
-            except Exception: pass
+            try:
+                self._w_grad_hook.remove()
+            except Exception:
+                pass
             self._w_grad_hook = None
+
         self._target = None
         self._N = None
         self._R = None
         self._Gacc = None
-        self._suspend_mask = False # reset de seguridad
+        self._suspend_mask = False  # reset de seguridad
         self._warned_shape_once = False
 
     # introspección

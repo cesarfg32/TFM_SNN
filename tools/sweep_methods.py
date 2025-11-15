@@ -12,6 +12,12 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Dict, Any, List
 
+# ── NUEVO: señal y volcados
+import os
+import signal
+import faulthandler
+faulthandler.enable()  # habilita dump de trazas bajo demanda
+
 # Asegura que 'src' esté en el sys.path ejecutando desde la raíz del repo
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -58,8 +64,7 @@ def _read_sweep(path: Path):
     raise TypeError("El sweep debe ser una lista o un dict con una lista de runs.")
 
 def _norm_run(run_spec):
-    """
-    Devuelve dict canónico con keys:
+    """Devuelve dict canónico con keys:
       method(str), params(dict), tag(str|None),
       preset(str|None), seed(int|None), amp(bool|None)
     """
@@ -115,8 +120,58 @@ def _build_task_list_from_cfg(cfg):
 # ------------------------ ejecución aislada por subproceso ------------------------
 def _child_run(run_norm: Dict[str, Any], eff_preset: str, out_root: str, safe_dl: int, conn):
     """
-    Ejecuta un run en un subproceso y devuelve por pipe {"ok": bool, "run_dir": str} o {"ok": False, "error": str, "traceback": str}
+    Ejecuta un run en un subproceso y devuelve por pipe:
+      {"ok": True, "run_dir": str} o {"ok": False, "error": str, "traceback": str}
+    Con handlers de señal para volcado de memoria/trazas si el SO envía SIGTERM/SIGINT.
     """
+    # — NUEVO: handlers que vuelcan información si el proceso es terminado —
+    out_root_path = Path(out_root)
+    out_root_path.mkdir(parents=True, exist_ok=True)
+
+    def _dump_termination(signum: int, frame):
+        try:
+            pid = os.getpid()
+            logf = out_root_path / f"_terminated_{pid}.log"
+            with logf.open("w", encoding="utf-8") as f:
+                f.write(f"[SIGNAL] {signum}\n")
+                # CPU memoria
+                try:
+                    import resource
+                    ru = resource.getrusage(resource.RUSAGE_SELF)
+                    f.write(f"ru_maxrss_kb={ru.ru_maxrss}\n")
+                except Exception:
+                    pass
+                try:
+                    import psutil
+                    p = psutil.Process(pid)
+                    f.write(f"rss_mb={p.memory_info().rss/1024**2:.2f}\n")
+                except Exception:
+                    pass
+                # CUDA memoria
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        f.write("\n[torch.cuda.memory_summary]\n")
+                        f.write(torch.cuda.memory_summary(device=None, abbreviated=False))
+                except Exception:
+                    pass
+                f.write("\n[faulthandler]\n")
+                try:
+                    faulthandler.dump_traceback(file=f, all_threads=True)
+                except Exception:
+                    pass
+            # salida limpia con código tipo "128+signal"
+        finally:
+            os._exit(128 + signum)
+
+    # registrar handlers
+    try:
+        signal.signal(signal.SIGTERM, _dump_termination)
+        signal.signal(signal.SIGINT,  _dump_termination)
+    except Exception:
+        pass
+
+    # ───────────────────────────────────────────────────────────────────────
     try:
         import torch
 
@@ -143,7 +198,7 @@ def _child_run(run_norm: Dict[str, Any], eff_preset: str, out_root: str, safe_dl
             cfg["optim"]["amp"] = bool(run_norm["amp"])
 
         # Safe dataloader niveles (opcional)
-        # 0: no tocar; 1: desactiva persistent_workers; 2: además num_workers=0 y pin_memory=False
+        # 0: no tocar; 1: persistent_workers=False; 2: además workers=0 y pin_memory=False
         if safe_dl >= 1:
             cfg.setdefault("data", {})
             cfg["data"]["persistent_workers"] = False
@@ -222,7 +277,7 @@ def main():
         print(f"\n=== [{i}/{len(runs)}] {r['method']} | tag={r['tag'] or 'exps'} | preset={eff_preset} ===\n")
 
         if args.isolate == "off":
-            # Modo “inline” (como tu script actual)
+            # Modo “inline”
             try:
                 cfg = load_preset(eff_preset)
                 cfg.setdefault("continual", {})
@@ -255,8 +310,7 @@ def main():
                 )
             except Exception as e:
                 print(f"[ERROR] {type(e).__name__}: {e}")
-
-            # Limpieza “fuerte” entre runs (cuando no hay aislamiento)
+            # Limpieza “fuerte” entre runs
             try:
                 import torch
                 if torch.cuda.is_available():
@@ -266,7 +320,6 @@ def main():
             except Exception:
                 pass
             gc.collect()
-
         else:
             # Modo aislado (recomendado)
             p_conn, c_conn = mp.Pipe(duplex=False)
@@ -277,7 +330,6 @@ def main():
             )
             proc.start()
             c_conn.close()
-
             try:
                 msg = p_conn.recv()
                 if isinstance(msg, dict) and msg.get("ok"):
@@ -295,7 +347,6 @@ def main():
                 p_conn.close()
 
         time.sleep(float(args.sleep))
-
     return 0
 
 if __name__ == "__main__":

@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 from typing import Optional, List, Dict, Any
 from torch import nn
 import torch
@@ -18,7 +17,6 @@ from .sca_snn import SCA_SNN
 from .colanet import CoLaNET
 
 # ------------------ validación y filtrado ------------------
-
 ALLOWED_KEYS: Dict[str, set[str]] = {
     "ewc": {
         "lambd", "fisher_batches",
@@ -39,6 +37,8 @@ ALLOWED_KEYS: Dict[str, set[str]] = {
         "measure_at", "attach_to", "gamma_ratio", "lambda_a", "ema",
         "do_synaptic_scaling", "scale_clip", "scale_bias", "penalty_mode",
         "activity_verbose", "activity_every", "eps", "name_suffix",
+        # NUEVO (normaliza la penalización por nº de hooks)
+        "normalize_by_nhooks",
     },
     "sca-snn": {
         "attach_to", "flatten_spatial", "num_bins", "anchor_batches",
@@ -63,12 +63,10 @@ GENERIC_TO_DROP = {
     "encoder", "gain",
 }
 
-
 def _filter_kwargs_for(method_name: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     method = method_name.lower().strip()
     allowed = ALLOWED_KEYS.get(method, set())
     return {k: v for k, v in kwargs.items() if (k in allowed) and (k not in GENERIC_TO_DROP)}
-
 
 def _validate_required(method_name: str, kwargs: Dict[str, Any]) -> None:
     req = REQUIRED.get(method_name.lower().strip(), set())
@@ -77,9 +75,7 @@ def _validate_required(method_name: str, kwargs: Dict[str, Any]) -> None:
         ms = ", ".join(missing)
         raise AssertionError(f"Faltan parámetros requeridos para '{method_name}': {ms}")
 
-
 # ------------------ fábrica ------------------
-
 def build_method(
     name: str,
     model: nn.Module,

@@ -8,7 +8,7 @@ defaults: &defaults
     name: pilotnet_snn
     img_w: 200
     img_h: 66
-    to_gray: true
+    to_gray: false
 
   data: &defaults_data
     # Codificación

@@ -1,3 +1,4 @@
+# src/training.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -31,6 +32,47 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
+# ── NUEVO: utilidades de memoria/log
+def _mem_snapshot():
+    # CPU
+    rss_mb = None
+    try:
+        import psutil
+        p = psutil.Process(os.getpid())
+        rss_mb = float(p.memory_info().rss) / (1024 ** 2)
+    except Exception:
+        try:
+            import resource
+            rss_kb = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            # en Linux ru_maxrss ya viene en KB, en macOS es en bytes -> nos vale como aproximación
+            rss_mb = rss_kb / 1024.0
+        except Exception:
+            rss_mb = None
+
+    # CUDA
+    cuda = {"alloc_mb": None, "resvd_mb": None, "peak_mb": None}
+    if torch.cuda.is_available():
+        try:
+            stats = torch.cuda.memory_stats()
+            cuda["alloc_mb"] = stats["allocated_bytes.all.current"] / (1024 ** 2)
+            cuda["resvd_mb"] = stats["reserved_bytes.all.current"] / (1024 ** 2)
+            cuda["peak_mb"]  = stats["allocated_bytes.all.peak"] / (1024 ** 2)
+        except Exception:
+            pass
+    return {"rss_mb": rss_mb, **cuda}
+
+def _maybe_log_mem(it_count: int, every: int):
+    if every <= 0:
+        return
+    if (it_count % every) != 0:
+        return
+    snap = _mem_snapshot()
+    print(
+        f"[MEM] rss={snap['rss_mb']:.0f}MB | "
+        f"cuda_alloc={'' if snap['alloc_mb'] is None else f'{snap['alloc_mb']:.0f}MB'} | "
+        f"cuda_resvd={'' if snap['resvd_mb'] is None else f'{snap['resvd_mb']:.0f}MB'} | "
+        f"cuda_peak={'' if snap['peak_mb'] is None else f'{snap['peak_mb']:.0f}MB'}"
+    )
 
 @dataclass
 class TrainConfig:
@@ -41,7 +83,6 @@ class TrainConfig:
     seed: Optional[int] = None
     es_patience: Optional[int] = None
     es_min_delta: float = 0.0
-
 
 def train_supervised(
     model: nn.Module,
@@ -73,7 +114,7 @@ def train_supervised(
     )
 
     opt = optim.Adam(model.parameters(), lr=cfg.lr)
-    scaler = GradScaler(enabled=use_amp) # con BF16 no es necesario, pero es inocuo
+    scaler = GradScaler(enabled=use_amp)  # con BF16 no es necesario, pero es inocuo
 
     history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_mse": []}
     t0 = time.time()
@@ -82,6 +123,9 @@ def train_supervised(
     best_state = None
 
     LOG_ITPS = os.environ.get("TRAIN_LOG_ITPS", "0") == "1"
+    LOG_MEM = os.environ.get("TRAIN_LOG_MEM", "0") == "1"
+    LOG_MEM_EVERY = int(os.environ.get("TRAIN_LOG_MEM_EVERY", "64"))
+
     phase_hint: Dict[str, str] = {"train": None, "val": None}
 
     # Permite que el método envuelva el loader si lo necesita (p.ej., Rehearsal)
@@ -110,11 +154,11 @@ def train_supervised(
             # Mueve y a device (x lo mueve _forward_* si es necesario)
             y = y.to(device, non_blocking=True)
 
-            # <<< CAMBIO CLAVE: autocast (BF16 si disponible) cubre forward+loss; desactivamos AMP interno >>>
+            # <<< autocast (BF16 si disponible) cubre forward+loss; sin AMP interno >>>
             with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
                 y_hat = _forward_with_cached_orientation(
                     model=model, x=x, y=y, device=device,
-                    use_amp=False, # << evitamos doble autocast; usamos el nuestro
+                    use_amp=False,  # << evitamos doble autocast; usamos el nuestro
                     phase_hint=phase_hint, phase="train"
                 )
                 # Alinea target y garantiza mismo dtype que y_hat
@@ -123,7 +167,7 @@ def train_supervised(
                 )
                 loss_base = loss_fn(y_hat, y_aligned)
 
-                # Regularización del método (EWC, etc.) al mismo dtype que y_hat
+                # Regularización del método al mismo dtype
                 pen = 0.0
                 if method is not None:
                     p = method.penalty()
@@ -131,10 +175,9 @@ def train_supervised(
                         pen = p.to(device=y_hat.device, dtype=y_hat.dtype)
                     else:
                         pen = torch.tensor(float(p), device=y_hat.device, dtype=y_hat.dtype)
-
                 loss = loss_base + pen
 
-            # Logging neutral opcional
+            # Logging interno opcional
             log_inner = bool(getattr(method, "inner_verbose", False))
             log_every = int(getattr(method, "inner_every", 50))
             if method is not None and log_inner and (it_count % max(1, log_every) == 0):
@@ -185,6 +228,8 @@ def train_supervised(
                     pass
 
             it_count += 1
+            if LOG_MEM:
+                _maybe_log_mem(it_count, LOG_MEM_EVERY)
 
         if LOG_ITPS and torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -203,10 +248,10 @@ def train_supervised(
         with torch.no_grad():
             for x, y in val_loader:
                 y = y.to(device, non_blocking=True)
-                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast): # <<< idem BF16
+                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
                     y_hat = _forward_with_cached_orientation(
                         model=model, x=x, y=y, device=device,
-                        use_amp=False, # << evitamos doble autocast en val
+                        use_amp=False,  # sin doble autocast en val
                         phase_hint=phase_hint, phase="val"
                     )
                     y_aligned = _align_target_shape(y_hat, y).to(
@@ -274,6 +319,18 @@ def train_supervised(
             "best_val": best_val if best_val != float("inf") else None,
         },
         "checkpoints": {"best": str(best_ckpt), "last": str(last_ckpt)},
+        "mem_last": _mem_snapshot(),  # NUEVO
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    # Dump opcional de memoria CUDA al final (si se pide)
+    if os.environ.get("TRAIN_DUMP_MEM_SUMMARY", "0") == "1" and torch.cuda.is_available():
+        try:
+            (out_dir / "memory_summary.txt").write_text(
+                torch.cuda.memory_summary(device=None, abbreviated=False),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
+
     return history

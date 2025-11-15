@@ -1,0 +1,7 @@
+# configs/fast_nopin.yaml
+extends: fast
+data:
+  pin_memory: false
+  persistent_workers: false
+  num_workers: 0
+  prefetch_factor: 1

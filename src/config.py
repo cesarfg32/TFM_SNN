@@ -1,9 +1,8 @@
-# src/config.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, Iterable
+from typing import Any, Dict, Optional, Union, Iterable, List
 import os
 import json
 
@@ -11,6 +10,7 @@ try:
     import yaml  # PyYAML
 except Exception as e:
     raise ImportError("Falta PyYAML. Instálalo con: pip install pyyaml") from e
+
 
 # =========================
 #  Búsqueda de presets
@@ -33,6 +33,7 @@ _DEFAULT_COLLECTION_BASENAMES: tuple[str, ...] = (
     "presets.yml",
 )
 
+
 def _iter_candidate_dirs() -> Iterable[Path]:
     """Genera carpetas a explorar, respetando PRESETS_DIR si existe."""
     env = os.getenv(_PRESETS_DIR_ENV, None)
@@ -43,6 +44,7 @@ def _iter_candidate_dirs() -> Iterable[Path]:
     for d in _DEFAULT_DIRS:
         if d.exists() and d.is_dir():
             yield d
+
 
 def _iter_collection_files() -> Iterable[Path]:
     """Genera archivos colección candidatos, respetando PRESETS_FILE si existe."""
@@ -57,6 +59,7 @@ def _iter_collection_files() -> Iterable[Path]:
             if p.exists() and p.is_file():
                 yield p
 
+
 def _find_individual_preset_file(name: str) -> Optional[Path]:
     """
     Busca 'name.yaml' o 'name.yml' en las carpetas conocidas.
@@ -69,6 +72,7 @@ def _find_individual_preset_file(name: str) -> Optional[Path]:
                 return cand
     return None
 
+
 def _yaml_load(path: Path) -> Dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -79,10 +83,21 @@ def _yaml_load(path: Path) -> Dict[str, Any]:
     except Exception as e:
         raise RuntimeError(f"Error al leer YAML de {path}: {e}") from e
 
+
+def _deep_update(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    """Actualiza recursivamente 'base' con 'overlay' (dict profundo)."""
+    for k, v in (overlay or {}).items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_update(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
 def _ensure_sections(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Asegura presencia de secciones mínimas esperadas por runner/training:
-    data, optim, continual, naming, logging, prep. No pisa valores existentes.
+    data, optim, continual, naming, logging, prep, model. No pisa valores existentes.
     """
     cfg.setdefault("data", {})
     cfg.setdefault("optim", {})
@@ -90,7 +105,9 @@ def _ensure_sections(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cfg.setdefault("naming", {})
     cfg.setdefault("logging", {})
     cfg.setdefault("prep", {})
+    cfg.setdefault("model", {})  # NUEVO: asegura sección model
 
+    # Defaults de data
     d = cfg["data"]
     d.setdefault("encoder", "rate")
     d.setdefault("T", 10)
@@ -101,6 +118,7 @@ def _ensure_sections(cfg: Dict[str, Any]) -> Dict[str, Any]:
     d.setdefault("pin_memory", True)
     d.setdefault("persistent_workers", True)
 
+    # Defaults de optim
     o = cfg["optim"]
     o.setdefault("epochs", 2)
     o.setdefault("batch_size", 8)
@@ -109,11 +127,20 @@ def _ensure_sections(cfg: Dict[str, Any]) -> Dict[str, Any]:
     o.setdefault("es_patience", None)
     o.setdefault("es_min_delta", 0.0)
 
+    # Defaults de continual
     c = cfg["continual"]
     c.setdefault("method", "naive")
     c.setdefault("params", {})
 
+    # Defaults de model (alineados con utils_components)
+    m = cfg["model"]
+    m.setdefault("name", "pilotnet_snn")
+    m.setdefault("img_w", 200)
+    m.setdefault("img_h", 66)
+    m.setdefault("to_gray", True)
+
     return cfg
+
 
 def _resolve_from_collection(key: str) -> Optional[tuple[Path, Dict[str, Any]]]:
     """
@@ -125,11 +152,47 @@ def _resolve_from_collection(key: str) -> Optional[tuple[Path, Dict[str, Any]]]:
         # Caso 1: el YAML tiene directamente fast/std/accurate como claves top-level
         if key in data and isinstance(data[key], dict):
             return file, data[key]
-        # Caso 2 (opcional): el YAML anida bajo 'presets': { fast: {...}, ... }
+        # Caso 2: el YAML anida bajo 'presets': { fast: {...}, ... }
         presets = data.get("presets")
         if isinstance(presets, dict) and key in presets and isinstance(presets[key], dict):
             return file, presets[key]
     return None
+
+
+def _load_extends_token(token: str) -> Dict[str, Any]:
+    """
+    Carga un preset indicado en 'extends'. Soporta:
+      - Nombre simple: 'fast'
+      - Ruta YAML completa: 'configs/fast.yaml'
+      - Ruta + clave: 'configs/presets.yaml:fast'
+    """
+    token = str(token).strip()
+    if ":" in token:
+        left, right = token.split(":", 1)
+        p = Path(left)
+        if p.suffix.lower() in (".yaml", ".yml"):
+            return load_preset(p, right)
+    # Si no hay ':', o no es YAML, deja que load_preset resuelva nombre o ruta
+    return load_preset(token)
+
+
+def _apply_extends_chain(base_cfg: Dict[str, Any], extends_decl: Union[str, List[str]]) -> Dict[str, Any]:
+    """
+    Aplica uno o varios 'extends' sobre base_cfg (overlay por la derecha).
+    extends_decl puede ser string o lista de strings.
+    """
+    if isinstance(extends_decl, str):
+        parent = _load_extends_token(extends_decl)
+        return _deep_update(parent, base_cfg)
+    elif isinstance(extends_decl, list):
+        merged: Dict[str, Any] = {}
+        for tok in extends_decl:
+            parent = _load_extends_token(tok)
+            _deep_update(merged, parent)
+        return _deep_update(merged, base_cfg)
+    else:
+        return base_cfg
+
 
 def load_preset(
     name_or_path: Union[str, os.PathLike],
@@ -149,8 +212,12 @@ def load_preset(
          - Igual que (2), usando Path.
 
       4) load_preset("configs/mi_preset_individual.yaml")
-         - Carga un YAML individual completo (sin subclave), como antes.
+         - Carga un YAML individual completo (sin subclave).
 
+    Además:
+      - Soporta herencia con 'extends' (string o lista):
+          extends: fast
+          extends: [fast, configs/otra.yaml:clave]
     Devuelve un dict con secciones mínimas aseguradas y meta-información en _meta.
     """
     p = Path(str(name_or_path))
@@ -185,13 +252,18 @@ def load_preset(
                     f"El YAML {p} no contiene la clave '{preset_key}' ni bajo 'presets'."
                 )
 
+        # Herencia si el subbloque define 'extends'
+        ext = subcfg.pop("extends", None)
+        if ext:
+            subcfg = _apply_extends_chain(subcfg, ext)
+
         cfg = _ensure_sections(subcfg)
         cfg.setdefault("_meta", {})
         cfg["_meta"]["preset_path"] = str(p.resolve())
         cfg["_meta"]["preset_key"] = str(preset_key)
         return cfg
 
-    # --- Modo 1-parámetro (compatible con la versión actual) ---
+    # --- Modo 1-parámetro ---
     # 1) Si te pasan una ruta a YAML, úsala directamente
     if p.suffix.lower() in (".yaml", ".yml"):
         if not p.exists():
@@ -200,7 +272,14 @@ def load_preset(
                 p = p2
             else:
                 raise FileNotFoundError(f"No existe el archivo de preset: {p}")
+
         data = _yaml_load(p)
+
+        # Herencia si el YAML top-level define 'extends'
+        ext = data.pop("extends", None)
+        if ext:
+            data = _apply_extends_chain(data, ext)
+
         cfg = _ensure_sections(data)
         cfg.setdefault("_meta", {})
         cfg["_meta"]["preset_path"] = str(p.resolve())
@@ -210,6 +289,12 @@ def load_preset(
     found = _find_individual_preset_file(p.name)
     if found is not None:
         data = _yaml_load(found)
+
+        # Herencia si define 'extends'
+        ext = data.pop("extends", None)
+        if ext:
+            data = _apply_extends_chain(data, ext)
+
         cfg = _ensure_sections(data)
         cfg.setdefault("_meta", {})
         cfg["_meta"]["preset_path"] = str(found.resolve())
@@ -219,6 +304,12 @@ def load_preset(
     resolved = _resolve_from_collection(p.name)
     if resolved is not None:
         file, subcfg = resolved
+
+        # Herencia si el bloque define 'extends'
+        ext = subcfg.pop("extends", None)
+        if ext:
+            subcfg = _apply_extends_chain(subcfg, ext)
+
         cfg = _ensure_sections(subcfg)
         cfg.setdefault("_meta", {})
         cfg["_meta"]["preset_path"] = str(file.resolve())
@@ -233,6 +324,7 @@ def load_preset(
         f"- O crea 'configs/{p.name}.yaml' (o usa {_PRESETS_DIR_ENV})\n"
         f"- O pasa la ruta completa a un YAML."
     )
+
 
 def load_preset_from(path: Union[str, os.PathLike], key: str) -> Dict[str, Any]:
     """Azúcar sintáctico retrocompatible: load_preset(path, key)."""
