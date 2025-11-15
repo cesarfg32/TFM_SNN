@@ -1,14 +1,10 @@
-# src/utils.py
 # -*- coding: utf-8 -*-
-"""
-Utilidades comunes del proyecto TFM_SNN (versión limpia, sin back-compat).
+"""Utilidades comunes del proyecto TFM_SNN (versión limpia, sin back-compat).
 - Reproducibilidad (seed_worker)
 - Collate para H5 (collate_h5)
 - Sampler balanceado por bins (steering)
 - DataLoaders desde CSV (runtime encode) u H5 (offline)
 - Selector de H5 por atributos y fábrica de loaders por preset
-
-NOTA: No exporta load_preset ni builders de componentes; eso vive en src.utils_components.
 """
 from __future__ import annotations
 
@@ -21,7 +17,6 @@ import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from .datasets import UdacityCSV, ImageTransform, AugmentConfig, H5SpikesDataset
-
 
 # ---------------------------------------------------------------------
 # Reproducibilidad por worker (DataLoader)
@@ -47,15 +42,11 @@ def set_seeds(seed: int = 42) -> None:
 # Collate para H5 (spikes offline)
 # ---------------------------------------------------------------------
 def collate_h5(batch):
-    """
-    Collate para tensores H5 (spikes) -> (xb, yb) apilados.
-    Espera pares (x, y).
-    """
+    """Collate para tensores H5 (spikes) -> (xb, yb) apilados."""
     xs, ys = zip(*batch)
     xb = torch.stack(xs, dim=0).contiguous()
     yb = torch.as_tensor(ys).float()
     return xb, yb
-
 
 # ---------------------------------------------------------------------
 # Sampler balanceado por bins para entrenamiento (reduce sesgo a rectas)
@@ -75,7 +66,6 @@ def _make_balanced_sampler(labels: List[float],
     w = inv[bin_ids]
     weights = torch.as_tensor(w, dtype=torch.double)
     return WeightedRandomSampler(weights=weights, num_samples=len(labels), replacement=True)
-
 
 # ---------------------------------------------------------------------
 # DataLoaders CSV (con augment opcional y balanceo) y H5
@@ -102,6 +92,7 @@ def make_loaders_from_csvs(
     balance_bins: int = 50,
     balance_smooth_eps: float = 1e-3,
     pin_memory_device: str = "cuda",
+    multiprocessing_context: Any | None = None,   # <--- NUEVO
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Crea DataLoaders desde CSV (imágenes) con o sin runtime encode."""
     # Datasets
@@ -136,9 +127,12 @@ def make_loaders_from_csvs(
 
     # pin_memory_device si DataLoader lo soporta
     _HAS_PIN_DEVICE = "pin_memory_device" in inspect.signature(DataLoader).parameters
+    _HAS_MPCTX      = "multiprocessing_context" in inspect.signature(DataLoader).parameters
     _dl_extra: Dict[str, Any] = {}
     if pin_memory and _HAS_PIN_DEVICE and pin_memory_device:
         _dl_extra["pin_memory_device"] = str(pin_memory_device)
+    if multiprocessing_context is not None and _HAS_MPCTX and num_workers > 0:
+        _dl_extra["multiprocessing_context"] = multiprocessing_context
 
     train_loader = DataLoader(
         tr_ds,
@@ -195,6 +189,7 @@ def make_loaders_from_h5(
     persistent_workers: bool = False,
     prefetch_factor: int | None = 2,
     pin_memory_device: str = "cuda",
+    multiprocessing_context: Any | None = None,  # <--- NUEVO
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Crea DataLoaders desde H5 (spikes offline)."""
     g = None
@@ -204,9 +199,12 @@ def make_loaders_from_h5(
         wfn = seed_worker
 
     _HAS_PIN_DEVICE = "pin_memory_device" in inspect.signature(DataLoader).parameters
+    _HAS_MPCTX      = "multiprocessing_context" in inspect.signature(DataLoader).parameters
     _dl_extra: Dict[str, Any] = {}
     if pin_memory and _HAS_PIN_DEVICE and pin_memory_device:
         _dl_extra["pin_memory_device"] = str(pin_memory_device)
+    if multiprocessing_context is not None and _HAS_MPCTX and num_workers > 0:
+        _dl_extra["multiprocessing_context"] = multiprocessing_context
 
     def _mk(path: Path, shuffle: bool) -> DataLoader:
         ds = H5SpikesDataset(path)
@@ -226,7 +224,6 @@ def make_loaders_from_h5(
         )
 
     return _mk(train_h5, True), _mk(val_h5, False), _mk(test_h5, False)
-
 
 # ---------------------------------------------------------------------
 # Selección de H5 por atributos (enc/T/gain/size/grayscale)
@@ -262,7 +259,6 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *,
         f"to_gray={want_gray}, gain={want_gain} | Vistos: {[p.name for p in candidates]}"
     )
 
-
 # ---------------------------------------------------------------------
 # Fábrica de loaders según preset (elige H5 offline o CSV + runtime)
 # ---------------------------------------------------------------------
@@ -285,6 +281,7 @@ def build_make_loader_fn(root: Path, *,
         "shuffle_train", "aug_train",
         "balance_train", "balance_bins", "balance_smooth_eps",
         "pin_memory_device",
+        "multiprocessing_context",                 # <--- NUEVO
     }
 
     def make_loader_fn(task, batch_size, encoder, T, gain, tfm, seed, **dl_kwargs):
@@ -310,6 +307,7 @@ def build_make_loader_fn(root: Path, *,
                 persistent_workers=clean_dl.get("persistent_workers", False),
                 prefetch_factor=clean_dl.get("prefetch_factor", 2),
                 pin_memory_device=clean_dl.get("pin_memory_device", "cuda"),
+                multiprocessing_context=clean_dl.get("multiprocessing_context", None),
             )
 
         # CSV (imágenes) con/ sin runtime encode
@@ -328,7 +326,9 @@ def build_make_loader_fn(root: Path, *,
             batch_size=batch_size,
             encoder=encoder_for_loader,
             T=T, gain=gain, tfm=tfm, seed=seed,
-            **clean_dl
+            multiprocessing_context=clean_dl.get("multiprocessing_context", None),
+            **{k: v for k, v in clean_dl.items()
+               if k not in {"multiprocessing_context"}}
         )
 
     return make_loader_fn

@@ -1,0 +1,17 @@
+{
+  "experiments": [
+
+    { "tag": "fast_sa_k0p10_tau24_vt125_f6", "preset": "fast", "seed": 42, "amp": true,
+      "method": "sa-snn",
+      "params": { "attach_to": "f6", "k": 0.10, "tau": 24.0, "vt_scale": 1.25,
+                  "th_min": 1.0, "th_max": 2.0, "p": 2000000,
+                  "flatten_spatial": false, "assume_binary_spikes": false,
+                  "reset_counters_each_task": true, "update_on_eval": false } },
+
+    { "tag": "fast_sca_b80_bias012_t012_ab12_f6", "preset": "fast", "seed": 42, "amp": true,
+      "method": "sca-snn",
+      "params": { "attach_to": "f6", "flatten_spatial": true, "num_bins": 32,
+                  "anchor_batches": 12, "beta": 0.80, "bias": 0.12,
+                  "soft_mask_temp": 0.12, "habit_decay": 0.97, "verbose": false } }
+  ]
+}

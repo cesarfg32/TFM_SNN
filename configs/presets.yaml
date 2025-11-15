@@ -8,7 +8,7 @@ defaults: &defaults
     name: pilotnet_snn
     img_w: 200
     img_h: 66
-    to_gray: false
+    to_gray: true
 
   data: &defaults_data
     # Codificación
@@ -20,7 +20,7 @@ defaults: &defaults
 
     # Reproductibilidad / rendimiento (estable /dev/shm)
     seed: 42
-    num_workers: 6
+    num_workers: 8
     prefetch_factor: 2
     pin_memory: true
     persistent_workers: false

@@ -16,6 +16,7 @@ from tqdm import tqdm
 from .utils import set_seeds
 # Helpers neutrales (y RE-EXPORT para compatibilidad con imports antiguos)
 from .nn_io import set_encode_runtime, _align_target_shape, _forward_with_cached_orientation
+
 __all__ = [
     "TrainConfig",
     "train_supervised",
@@ -30,47 +31,6 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
-# ── NUEVO: utilidades de memoria/log
-def _mem_snapshot():
-    # CPU
-    rss_mb = None
-    try:
-        import psutil
-        p = psutil.Process(os.getpid())
-        rss_mb = float(p.memory_info().rss) / (1024 ** 2)
-    except Exception:
-        try:
-            import resource
-            rss_kb = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-            # en Linux ru_maxrss ya viene en KB, en macOS es en bytes -> nos vale como aproximación
-            rss_mb = rss_kb / 1024.0
-        except Exception:
-            rss_mb = None
-
-    # CUDA
-    cuda = {"alloc_mb": None, "resvd_mb": None, "peak_mb": None}
-    if torch.cuda.is_available():
-        try:
-            stats = torch.cuda.memory_stats()
-            cuda["alloc_mb"] = stats["allocated_bytes.all.current"] / (1024 ** 2)
-            cuda["resvd_mb"] = stats["reserved_bytes.all.current"] / (1024 ** 2)
-            cuda["peak_mb"]  = stats["allocated_bytes.all.peak"] / (1024 ** 2)
-        except Exception:
-            pass
-    return {"rss_mb": rss_mb, **cuda}
-
-def _maybe_log_mem(it_count: int, every: int):
-    if every <= 0:
-        return
-    if (it_count % every) != 0:
-        return
-    snap = _mem_snapshot()
-    print(
-        f"[MEM] rss={snap['rss_mb']:.0f}MB | "
-        f"cuda_alloc={'' if snap['alloc_mb'] is None else f'{snap['alloc_mb']:.0f}MB'} | "
-        f"cuda_resvd={'' if snap['resvd_mb'] is None else f'{snap['resvd_mb']:.0f}MB'} | "
-        f"cuda_peak={'' if snap['peak_mb'] is None else f'{snap['peak_mb']:.0f}MB'}"
-    )
 
 @dataclass
 class TrainConfig:
@@ -81,6 +41,7 @@ class TrainConfig:
     seed: Optional[int] = None
     es_patience: Optional[int] = None
     es_min_delta: float = 0.0
+
 
 def train_supervised(
     model: nn.Module,
@@ -104,12 +65,15 @@ def train_supervised(
     model = model.to(device)
 
     use_amp = bool(cfg.amp and torch.cuda.is_available())
-    # <<< CAMBIO CLAVE: usar GradScaler solo en FP16; BF16 no escala >>>
-    use_bf16 = bool(use_amp and torch.cuda.is_bf16_supported())
-    dtype_autocast = (torch.bfloat16 if use_bf16 else torch.float16) if use_amp else None
+    # <<< CAMBIO CLAVE: elegimos dtype de autocast (BF16 si está soportado) >>>
+    dtype_autocast = (
+        torch.bfloat16
+        if (use_amp and torch.cuda.is_bf16_supported())
+        else torch.float16
+    )
 
     opt = optim.Adam(model.parameters(), lr=cfg.lr)
-    scaler = GradScaler(enabled=(use_amp and not use_bf16))  # solo FP16
+    scaler = GradScaler(enabled=use_amp)  # con BF16 no es necesario, pero es inocuo
 
     history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_mse": []}
     t0 = time.time()
@@ -118,9 +82,6 @@ def train_supervised(
     best_state = None
 
     LOG_ITPS = os.environ.get("TRAIN_LOG_ITPS", "0") == "1"
-    LOG_MEM = os.environ.get("TRAIN_LOG_MEM", "0") == "1"
-    LOG_MEM_EVERY = int(os.environ.get("TRAIN_LOG_MEM_EVERY", "64"))
-
     phase_hint: Dict[str, str] = {"train": None, "val": None}
 
     # Permite que el método envuelva el loader si lo necesita (p.ej., Rehearsal)
@@ -149,7 +110,7 @@ def train_supervised(
             # Mueve y a device (x lo mueve _forward_* si es necesario)
             y = y.to(device, non_blocking=True)
 
-            # <<< autocast (BF16 si disponible) cubre forward+loss; sin AMP interno >>>
+            # <<< CAMBIO CLAVE: autocast (BF16 si disponible) cubre forward+loss; desactivamos AMP interno >>>
             with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
                 y_hat = _forward_with_cached_orientation(
                     model=model, x=x, y=y, device=device,
@@ -162,7 +123,7 @@ def train_supervised(
                 )
                 loss_base = loss_fn(y_hat, y_aligned)
 
-                # Regularización del método al mismo dtype
+                # Regularización del método (EWC, etc.) al mismo dtype que y_hat
                 pen = 0.0
                 if method is not None:
                     p = method.penalty()
@@ -170,14 +131,15 @@ def train_supervised(
                         pen = p.to(device=y_hat.device, dtype=y_hat.dtype)
                     else:
                         pen = torch.tensor(float(p), device=y_hat.device, dtype=y_hat.dtype)
+
                 loss = loss_base + pen
 
-            # Logging interno opcional
+            # Logging neutral opcional
             log_inner = bool(getattr(method, "inner_verbose", False))
             log_every = int(getattr(method, "inner_every", 50))
             if method is not None and log_inner and (it_count % max(1, log_every) == 0):
                 base_val = float(loss_base.detach().item())
-                pen_val = float(pen.detach().item() if isinstance(pen, torch.Tensor) else float(pen))
+                pen_val  = float(pen.detach().item() if isinstance(pen, torch.Tensor) else float(pen))
                 ratio = pen_val / max(1e-8, base_val)
                 suggest_msg = ""
                 tun = getattr(method, "tunable", None)
@@ -203,7 +165,7 @@ def train_supervised(
                     pass
 
             opt.zero_grad(set_to_none=True)
-            if use_amp and not use_bf16:
+            if use_amp:
                 scaler.scale(loss).backward()
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -223,15 +185,13 @@ def train_supervised(
                     pass
 
             it_count += 1
-            if LOG_MEM:
-                _maybe_log_mem(it_count, LOG_MEM_EVERY)
 
         if LOG_ITPS and torch.cuda.is_available():
             torch.cuda.synchronize()
         dt = time.perf_counter() - t_epoch0
         if LOG_ITPS and dt > 0:
             ips = it_count / dt
-            print(f"[TRAIN it/s] epoch {epoch}/{cfg.epochs}: {ips:.1f} it/s ({it_count} iters en {dt:.2f}s)")
+            print(f"[TRAIN it/s] epoch {epoch}/{cfg.epochs}: {ips:.1f} it/s  ({it_count} iters en {dt:.2f}s)")
 
         train_loss = running / max(1, len(train_loader))
 
@@ -243,10 +203,10 @@ def train_supervised(
         with torch.no_grad():
             for x, y in val_loader:
                 y = y.to(device, non_blocking=True)
-                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
+                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):  # <<< idem BF16
                     y_hat = _forward_with_cached_orientation(
                         model=model, x=x, y=y, device=device,
-                        use_amp=False,  # sin doble autocast en val
+                        use_amp=False,  # << evitamos doble autocast en val
                         phase_hint=phase_hint, phase="val"
                     )
                     y_aligned = _align_target_shape(y_hat, y).to(
@@ -260,7 +220,7 @@ def train_supervised(
                 n_val_batches += 1
 
         val_loss = v_running_mse / max(1, n_val_batches)
-        val_mae = v_running_mae / max(1, n_val_batches)
+        val_mae  = v_running_mae / max(1, n_val_batches)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
@@ -314,18 +274,79 @@ def train_supervised(
             "best_val": best_val if best_val != float("inf") else None,
         },
         "checkpoints": {"best": str(best_ckpt), "last": str(last_ckpt)},
-        "mem_last": _mem_snapshot(),  # NUEVO
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    # Dump opcional de memoria CUDA al final (si se pide)
-    if os.environ.get("TRAIN_DUMP_MEM_SUMMARY", "0") == "1" and torch.cuda.is_available():
-        try:
-            (out_dir / "memory_summary.txt").write_text(
-                torch.cuda.memory_summary(device=None, abbreviated=False),
-                encoding="utf-8"
-            )
-        except Exception:
-            pass
-
     return history
+
+if __name__ == "__main__":
+    import argparse, json
+    from pathlib import Path
+    # Importamos dentro para no romper usos como librería
+    from .config import load_preset
+    from .utils_components import build_components_for
+    from .runner import run_continual
+
+    def _deep_update(base: dict, overlay: dict) -> dict:
+        for k, v in (overlay or {}).items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                _deep_update(base[k], v)
+            else:
+                base[k] = v
+        return base
+
+    ap = argparse.ArgumentParser(description="Entrenador CLI (compatible con sweep)")
+    ap.add_argument("--config", required=True, help="Ruta al JSON con overrides (lo escribe el sweep)")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    cfg_in_path = Path(args.config)
+    with cfg_in_path.open("r", encoding="utf-8") as f:
+        cfg_in = json.load(f)
+
+    # 1) Partimos del preset declarado en el JSON del sweep
+    preset_name = str(cfg_in.get("preset", "fast"))
+    cfg = load_preset(preset_name)
+
+    # 2) Mezclamos overrides del sweep (naming, data.*, method, tasks, etc.)
+    _deep_update(cfg, cfg_in)
+
+    # 3) Mapear bloque "method" del sweep → sección esperada por runner (`continual`)
+    meth = (cfg_in.get("method") or {})
+    if isinstance(meth, dict):
+        mname = str(meth.get("name", cfg["continual"].get("method", "naive")))
+        mparams = {k: v for k, v in meth.items() if k != "name"}
+        cfg["continual"]["method"] = mname
+        cfg["continual"]["params"] = mparams
+
+    # 4) Selección de tareas:
+    #    - Preferimos lista 'tasks' (CL real: p.ej., ["circuito1","circuito2"])
+    #    - Fallback: data.which_circuit (modo antiguo, 1 tarea)
+    task_list = None
+    tasks_decl = cfg_in.get("tasks", None)
+    if isinstance(tasks_decl, list) and tasks_decl:
+        task_list = [{"name": str(t)} for t in tasks_decl]
+    else:
+        task_name = str(cfg.get("data", {}).get("which_circuit", "circuito1"))
+        task_list = [{"name": task_name}]
+
+    if args.dry_run:
+        print("[DRY] config:", {
+            "preset": preset_name,
+            "tasks": [t["name"] for t in task_list],
+            "method": cfg["continual"]["method"],
+            "params": cfg["continual"].get("params", {}),
+        })
+        raise SystemExit(0)
+
+    # 5) Construir componentes y ejecutar (CL secuencial si hay múltiples tareas)
+    make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
+    run_continual(
+        task_list=task_list,
+        make_loader_fn=make_loader_fn,
+        make_model_fn=make_model_fn,
+        tfm=tfm,
+        cfg=cfg,
+        preset_name=preset_name,
+        out_root=Path("outputs"),
+        verbose=True,
+    )
