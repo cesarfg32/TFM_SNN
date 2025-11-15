@@ -1,4 +1,12 @@
 [
+  {
+    "tag": "smoke_naive",
+    "preset": "fast",
+    "seed": 42,
+    "amp": true,
+    "method": "naive",
+    "method_kwargs": {}
+  },
   { "tag": "fast3_ewc_l6e8_fb32_ampbf16", "preset": "fast", "seed": 42, "amp": true,
     "method": "ewc",
     "method_kwargs": { "lambd": 600000000, "fisher_batches": 32,
