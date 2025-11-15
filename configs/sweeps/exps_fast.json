@@ -1,17 +1,10 @@
 [
-  { "tag": "fast3_as_gr055_lam038_ema095_l1_att_f6", "preset": "fast", "seed": 42, "amp": true, "method": "as-snn",
-    "method_kwargs": { "gamma_ratio": 0.55, "lambda_a": 0.38, "penalty_mode": "l1", "attach_to": "f6", "input_ema_tau": 0.95, "activity_verbose": false } },
-  { "tag": "fast3_as_gr050_lam036_ema095_l1_att_f6", "preset": "fast", "seed": 42, "amp": true, "method": "as-snn",
-    "method_kwargs": { "gamma_ratio": 0.5, "lambda_a": 0.36, "penalty_mode": "l1", "attach_to": "f6", "input_ema_tau": 0.95, "activity_verbose": false } },
-  { "tag": "fast3_as_gr060_lam035_ema095_l1_att_f6", "preset": "fast", "seed": 42, "amp": true, "method": "as-snn",
-    "method_kwargs": { "gamma_ratio": 0.6, "lambda_a": 0.35, "penalty_mode": "l1", "attach_to": "f6", "input_ema_tau": 0.95, "activity_verbose": false } },
-  { "tag": "fast3_as_gr050_lam036_ema095_l1_att_f6", "preset": "fast", "seed": 42, "amp": true, "method": "as-snn",
-    "method_kwargs": { "gamma_ratio": 0.5, "lambda_a": 0.36, "penalty_mode": "l1", "attach_to": "f6", "input_ema_tau": 0.95, "activity_verbose": false } },
-  { "tag": "fast3_as_gr065_lam038_ema095_l1_att_f6", "preset": "fast", "seed": 42, "amp": true, "method": "as-snn",
-    "method_kwargs": { "gamma_ratio": 0.65, "lambda_a": 0.38, "penalty_mode": "l1", "attach_to": "f6", "input_ema_tau": 0.95, "activity_verbose": false } },
-  { "tag": "fast3_as_gr055_lam036_ema090_l1_att_f6", "preset": "fast", "seed": 42, "amp": true, "method": "as-snn",
-    "method_kwargs": { "gamma_ratio": 0.55, "lambda_a": 0.36, "penalty_mode": "l1", "attach_to": "f6", "input_ema_tau": 0.90, "activity_verbose": false } },
-  { "tag": "fast3_as_gr060_lam036_ema090_l1_att_f6", "preset": "fast", "seed": 42, "amp": true, "method": "as-snn",
-    "method_kwargs": { "gamma_ratio": 0.6, "lambda_a": 0.36, "penalty_mode": "l1", "attach_to": "f6", "input_ema_tau": 0.90, "activity_verbose": false } }
+  {
+    "tag": "fast_naive_baseline",
+    "preset": "fast",
+    "seed": 42,
+    "amp": true,
+    "method": "naive",
+    "method_kwargs": {}
+  }
 ]
-

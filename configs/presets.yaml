@@ -20,7 +20,7 @@ defaults: &defaults
 
     # Reproductibilidad / rendimiento (estable /dev/shm)
     seed: 42
-    num_workers: 4
+    num_workers: 6
     prefetch_factor: 2
     pin_memory: true
     persistent_workers: false

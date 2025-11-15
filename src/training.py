@@ -1,7 +1,6 @@
 # src/training.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
 import json
 import time
 import os
@@ -17,7 +16,6 @@ from tqdm import tqdm
 from .utils import set_seeds
 # Helpers neutrales (y RE-EXPORT para compatibilidad con imports antiguos)
 from .nn_io import set_encode_runtime, _align_target_shape, _forward_with_cached_orientation
-
 __all__ = [
     "TrainConfig",
     "train_supervised",
@@ -106,15 +104,12 @@ def train_supervised(
     model = model.to(device)
 
     use_amp = bool(cfg.amp and torch.cuda.is_available())
-    # <<< CAMBIO CLAVE: elegimos dtype de autocast (BF16 si está soportado) >>>
-    dtype_autocast = (
-        torch.bfloat16
-        if (use_amp and torch.cuda.is_available() and torch.cuda.is_bf16_supported())
-        else torch.float16
-    )
+    # <<< CAMBIO CLAVE: usar GradScaler solo en FP16; BF16 no escala >>>
+    use_bf16 = bool(use_amp and torch.cuda.is_bf16_supported())
+    dtype_autocast = (torch.bfloat16 if use_bf16 else torch.float16) if use_amp else None
 
     opt = optim.Adam(model.parameters(), lr=cfg.lr)
-    scaler = GradScaler(enabled=use_amp)  # con BF16 no es necesario, pero es inocuo
+    scaler = GradScaler(enabled=(use_amp and not use_bf16))  # solo FP16
 
     history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_mse": []}
     t0 = time.time()
@@ -208,7 +203,7 @@ def train_supervised(
                     pass
 
             opt.zero_grad(set_to_none=True)
-            if use_amp:
+            if use_amp and not use_bf16:
                 scaler.scale(loss).backward()
                 scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

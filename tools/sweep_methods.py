@@ -1,4 +1,3 @@
-# tools/sweep_methods.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Dict, Any, List
 
-# ── NUEVO: señal y volcados
+# ── Señales y volcados de diagnóstico
 import os
 import signal
 import faulthandler
@@ -63,6 +62,7 @@ def _read_sweep(path: Path):
         )
     raise TypeError("El sweep debe ser una lista o un dict con una lista de runs.")
 
+
 def _norm_run(run_spec):
     """Devuelve dict canónico con keys:
       method(str), params(dict), tag(str|None),
@@ -110,6 +110,7 @@ def _norm_run(run_spec):
         }
     raise TypeError(f"Tipo de run no soportado: {type(run_spec)}")
 
+
 def _build_task_list_from_cfg(cfg):
     prep = cfg.get("prep", {}) or {}
     runs = prep.get("runs", None)
@@ -117,16 +118,20 @@ def _build_task_list_from_cfg(cfg):
         runs = ["circuito1", "circuito2"]
     return [{"name": str(r)} for r in runs]
 
+
 # ------------------------ ejecución aislada por subproceso ------------------------
 def _child_run(run_norm: Dict[str, Any], eff_preset: str, out_root: str, safe_dl: int, conn):
     """
     Ejecuta un run en un subproceso y devuelve por pipe:
       {"ok": True, "run_dir": str} o {"ok": False, "error": str, "traceback": str}
-    Con handlers de señal para volcado de memoria/trazas si el SO envía SIGTERM/SIGINT.
+    Con handlers de señal para volcado de memoria/trazas si el SO envía SIGTERM/SIGINT/SIGABRT.
     """
-    # — NUEVO: handlers que vuelcan información si el proceso es terminado —
     out_root_path = Path(out_root)
     out_root_path.mkdir(parents=True, exist_ok=True)
+
+    # ── Env WSL/HDF5/CUDA (solo si no vienen ya del entorno exterior)
+    os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
 
     def _dump_termination(signum: int, frame):
         try:
@@ -160,21 +165,22 @@ def _child_run(run_norm: Dict[str, Any], eff_preset: str, out_root: str, safe_dl
                     faulthandler.dump_traceback(file=f, all_threads=True)
                 except Exception:
                     pass
-            # salida limpia con código tipo "128+signal"
         finally:
             os._exit(128 + signum)
 
-    # registrar handlers
-    try:
-        signal.signal(signal.SIGTERM, _dump_termination)
-        signal.signal(signal.SIGINT,  _dump_termination)
-    except Exception:
-        pass
+    # registrar handlers (SIGTERM/SIGINT/SIGABRT)
+    for s in (getattr(signal, "SIGTERM", None),
+              getattr(signal, "SIGINT", None),
+              getattr(signal, "SIGABRT", None)):
+        if s is not None:
+            try:
+                signal.signal(s, _dump_termination)
+            except Exception:
+                pass
 
     # ───────────────────────────────────────────────────────────────────────
     try:
         import torch
-
         cfg = load_preset(eff_preset)
 
         # Continual
@@ -233,7 +239,6 @@ def _child_run(run_norm: Dict[str, Any], eff_preset: str, out_root: str, safe_dl
         gc.collect()
 
         conn.send({"ok": True, "run_dir": str(out_dir)})
-
     except Exception as e:
         tb = traceback.format_exc()
         conn.send({"ok": False, "error": f"{type(e).__name__}: {e}", "traceback": tb})
@@ -242,6 +247,14 @@ def _child_run(run_norm: Dict[str, Any], eff_preset: str, out_root: str, safe_dl
             conn.close()
         except Exception:
             pass
+
+
+def _best_ctx_name() -> str:
+    # Windows => spawn; Linux/WSL/macOS => fork (mejor para DataLoader)
+    if os.name == "nt" or sys.platform.startswith("win"):
+        return "spawn"
+    return "fork"
+
 
 # ---------------------------------- CLI main ----------------------------------
 def main():
@@ -321,9 +334,10 @@ def main():
                 pass
             gc.collect()
         else:
-            # Modo aislado (recomendado)
-            p_conn, c_conn = mp.Pipe(duplex=False)
-            proc = mp.Process(
+            # Modo aislado (recomendado) — contexto óptimo por SO
+            ctx = mp.get_context(_best_ctx_name())
+            p_conn, c_conn = ctx.Pipe(duplex=False)
+            proc = ctx.Process(
                 target=_child_run,
                 args=(r, eff_preset, str(out_root), int(args.safe_dataloader), c_conn),
                 daemon=False,
@@ -349,5 +363,11 @@ def main():
         time.sleep(float(args.sleep))
     return 0
 
+
 if __name__ == "__main__":
+    # No fuerces 'spawn' global en Linux/WSL; usa el mejor por SO
+    try:
+        mp.set_start_method("spawn" if (os.name == "nt" or sys.platform.startswith("win")) else "fork", force=True)
+    except Exception:
+        pass
     sys.exit(main())

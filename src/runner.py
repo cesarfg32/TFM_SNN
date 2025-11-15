@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple, List, Optional, Union
 
 # Entorno seguro para WSL/HDF5
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:64")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
 
 # Multiprocessing/Sharing: evita /dev/shm
 import torch.multiprocessing as mp
@@ -137,11 +137,11 @@ def _to_csv_lines_from_history(history: dict) -> str:
     cols = ["epoch", "train_loss", "val_loss", "val_mae", "val_mse", "train_mae", "train_mse"]
     L = max([
         len(history.get("train_loss", [])),
-        len(history.get("val_loss", [])),
-        len(history.get("val_mae", [])),
-        len(history.get("val_mse", [])),
-        len(history.get("train_mae", [])),
-        len(history.get("train_mse", [])),
+        len(history.get("val_loss",   [])),
+        len(history.get("val_mae",    [])),
+        len(history.get("val_mse",    [])),
+        len(history.get("train_mae",  [])),
+        len(history.get("train_mse",  [])),
         0
     ])
     lines = [",".join(cols)]
@@ -272,7 +272,8 @@ def run_continual(
     out_root: Optional[Union[Path, str]] = None,
     verbose: bool = True,
 ):
-    data = cfg["data"]; optim = cfg["optim"]; cont = cfg["continual"]; naming = cfg.get("naming", {})
+    data = cfg["data"]; optim = cfg["optim"]; cont = cfg["continual"]
+    naming = cfg.get("naming", {})
 
     encoder = str(data["encoder"])
     T = int(data["T"])
@@ -287,14 +288,15 @@ def run_continual(
 
     # ------------- DataLoader kwargs -------------
     dl_kwargs = dict(
-        num_workers = int(data["num_workers"]),
-        pin_memory = bool(data["pin_memory"]),
-        persistent_workers = bool(data["persistent_workers"]),
-        prefetch_factor = data["prefetch_factor"],
-        drop_last = True,
-        pin_memory_device = data.get("pin_memory_device", "cuda"),
-        timeout = 0,
+        num_workers         = int(data["num_workers"]),
+        pin_memory          = bool(data["pin_memory"]),
+        persistent_workers  = bool(data["persistent_workers"]),
+        prefetch_factor     = data["prefetch_factor"],
+        drop_last           = True,
+        pin_memory_device   = data.get("pin_memory_device", "cuda"),
+        timeout             = 0,
     )
+    # === Inyecta SIEMPRE un contexto "seguro" si hay workers>0 (como en master) ===
     mp_ctx = _get_mp_ctx()
     if mp_ctx is not None and dl_kwargs["num_workers"] > 0:
         dl_kwargs["multiprocessing_context"] = mp_ctx
@@ -321,7 +323,6 @@ def run_continual(
 
     # Logging opcional por método/submétodos
     log_root = (cfg.get("logging", {}) or {})
-
     def _apply_log_section(obj, key: str):
         sect = log_root.get(key, {}) or {}
         # Aliases universales (no rompen nada; conviven con las claves originales)
@@ -336,7 +337,7 @@ def run_continual(
                 if hasattr(obj, attr):
                     try: setattr(obj, attr, ev)
                     except Exception: pass
-        # Claves específicas (p.ej. fisher_verbose) siguen funcionando
+        # Claves específicas siguen funcionando (p.ej. fisher_verbose)
         for k, v in sect.items():
             try: setattr(obj, k, v)
             except Exception: pass
@@ -371,9 +372,9 @@ def run_continual(
     cc_offline = bool(tele_cfg.get("offline", True))
     cc_country = tele_cfg.get("country_iso_code") or os.getenv("CODECARBON_COUNTRY_ISO_CODE", None)
     cc_period = int(tele_cfg.get("measure_power_secs", 15))
-    cc_loglvl = str(tele_cfg.get("log_level", "warning")).lower()
+    cc_loglvl = str(tele_cfg.get("log_level", "error")).lower()
     try:
-        logging.getLogger("codecarbon").setLevel(getattr(logging, cc_loglvl.upper(), logging.WARNING))
+        logging.getLogger("codecarbon").setLevel(getattr(logging, cc_loglvl.upper(), logging.ERROR))
     except Exception:
         pass
 
@@ -395,7 +396,6 @@ def run_continual(
         "cc_period": cc_period,
         "cc_loglvl": cc_loglvl,
     })
-
     t_start = _time.time()
     cc_context = carbon_tracker_ctx(
         out_dir,
@@ -416,9 +416,9 @@ def run_continual(
         tracker_ref = _cc
 
         es_pat = optim.get("es_patience", None)
-        es_md = optim.get("es_min_delta", None)
+        es_md  = optim.get("es_min_delta", None)
         es_pat = int(es_pat) if es_pat is not None else None
-        es_md = float(es_md) if es_md is not None else 0.0
+        es_md  = float(es_md) if es_md is not None else 0.0
 
         tcfg = TrainConfig(
             epochs=epochs,
@@ -441,7 +441,6 @@ def run_continual(
                     f"\n--- Tarea {i}/{len(task_list)}: {name} | preset={preset_name} | method={method_obj.name} "
                     f"| B={bs} T={T} AMP={use_amp} | enc={encoder} ---"
                 )
-
             # Construcción loaders
             tr, va, te = make_loader_fn(
                 task=t, batch_size=bs, encoder=encoder, T=T, gain=gain, tfm=tfm, seed=seed, **dl_kwargs
@@ -457,7 +456,7 @@ def run_continual(
                 try:
                     set_encode_runtime(mode=encoder, T=T, gain=gain, device=device)
                     used_rt = True
-                    if verbose: print(" runtime encode: ON (GPU)")
+                    if verbose: print("  runtime encode: ON (GPU)")
                 except Exception:
                     used_rt = False
 
@@ -468,7 +467,7 @@ def run_continual(
             # Telemetría inicio de tarea
             log_telemetry_event(out_dir, {"event": "task_start", "task_idx": i, "task_name": name})
 
-            # ---- Fallback en before_task (p. ej. SCA puede acceder al loader) ----
+            # ---- Fallback en before_task ----
             try:
                 method_obj.before_task(model, tr, va)
             except Exception as e:
@@ -507,7 +506,6 @@ def run_continual(
                 torch.cuda.reset_peak_memory_stats()
                 torch.cuda.synchronize()
             t0 = _time.time()
-
             try:
                 history = train_supervised(
                     model, tr, va, loss_fn, tcfg, out_dir / f"task_{i}_{name}", method=method_obj
@@ -569,7 +567,7 @@ def run_continual(
                     "encoder": encoder,
                     "T": T,
                     "gain": gain,
-                    "batch_size": bs, # mantenemos B del preset
+                    "batch_size": bs,  # mantenemos B del preset
                     "epochs": epochs,
                     "lr": lr,
                     "amp": use_amp,
@@ -580,13 +578,31 @@ def run_continual(
             except Exception:
                 pass
 
+            # ---- OPCIONAL: volcado de estado del método (opt-in y genérico) ----
+            dump_activity = (os.getenv("DUMP_METHOD_ACTIVITY", "0") == "1")
+            try:
+                # Soporta ambos estilos de YAML: logging.methods.as-snn.dump_activity o logging.as-snn.dump_activity
+                log_cfg = (cfg.get("logging", {}) or {})
+                methods_cfg = (log_cfg.get("methods", {}) or {})
+                dump_activity = dump_activity or bool((methods_cfg.get(method, {}) or {}).get("dump_activity", False))
+                dump_activity = dump_activity or bool((log_cfg.get(method, {}) or {}).get("dump_activity", False))
+            except Exception:
+                pass
+            if dump_activity:
+                try:
+                    st = getattr(method_obj, "get_activity_state", None)
+                    if callable(st):
+                        fname = f"{method_obj.name.split('+')[0]}_activity.json"
+                        _safe_write(out_dir / f"task_{i}_{name}" / fname, st())
+                except Exception:
+                    pass
+
             n_epochs_done = len((history or {}).get("val_loss", []))
 
             # === EVAL con fallback ===
             te_mse, te_mae = _eval_with_fallback(te, model, loss_fn, device=device, use_amp=use_amp)
             results[name] = {"test_mse": te_mse, "test_mae": te_mae}
             seen.append((name, te))
-
             for pname, p_loader in seen[:-1]:
                 p_mse, p_mae = _eval_with_fallback(p_loader, model, loss_fn, device=device, use_amp=use_amp)
                 results[pname][f"after_{name}_mse"] = p_mse
@@ -610,7 +626,7 @@ def run_continual(
             if used_rt:
                 try:
                     set_encode_runtime(None)
-                    if verbose: print(" runtime encode: OFF")
+                    if verbose: print("  runtime encode: OFF")
                 except Exception:
                     pass
 
@@ -632,7 +648,7 @@ def run_continual(
     # --- Salidas finales ---
     _safe_write(out_dir / "continual_results.json", results)
 
-    names, mat = _build_eval_matrix(results) # matriz MAE
+    names, mat = _build_eval_matrix(results)  # matriz MAE
     eval_mat = {"tasks": names, "mae_matrix": _nan_to_none_matrix(mat)}
     _safe_write(out_dir / "eval_matrix.json", eval_mat)
 
@@ -653,13 +669,12 @@ def run_continual(
     for i, ti in enumerate(names):
         row_vals = [v for v in mat[i] if not (isinstance(v, float) and math.isnan(v))]
         final_mae = float(row_vals[-1]) if row_vals else None
-        best_mae = float(min(row_vals)) if row_vals else None
+        best_mae  = float(min(row_vals)) if row_vals else None
         base = perf_rows[i] if i < len(perf_rows) else {"task_idx": i+1, "task_name": ti}
         base = dict(base)
         base["final_mae"] = final_mae
-        base["best_mae"] = best_mae
+        base["best_mae"]  = best_mae
         perf_rows_enriched.append(base)
-
     if len(perf_rows_enriched) > 0:
         _safe_write(out_dir / "per_task_perf.json", perf_rows_enriched)
         # CSV v1
@@ -692,7 +707,7 @@ def run_continual(
         "method": method_obj.name,
         "encoder": encoder,
         "T": T,
-        "batch_size": bs, # del preset
+        "batch_size": bs,  # del preset
         "amp": use_amp,
         "seed": seed,
         "model": _model_label(model, tfm),
@@ -800,13 +815,13 @@ def reevaluate_only(
 
     # Preconstruir loaders de TEST por tarea
     dl_kwargs = dict(
-        num_workers = int(data["num_workers"]),
-        pin_memory = bool(data["pin_memory"]),
-        persistent_workers = False,
-        prefetch_factor = data["prefetch_factor"],
-        drop_last = False,
-        pin_memory_device = data.get("pin_memory_device", "cuda"),
-        timeout = 0,
+        num_workers         = int(data["num_workers"]),
+        pin_memory          = bool(data["pin_memory"]),
+        persistent_workers  = False,
+        prefetch_factor     = data["prefetch_factor"],
+        drop_last           = False,
+        pin_memory_device   = data.get("pin_memory_device", "cuda"),
+        timeout             = 0,
     )
     tests: List[Tuple[str, Any]] = []
     for i, t in enumerate(task_list, start=1):
@@ -860,8 +875,8 @@ def reevaluate_only(
     for i, ti in enumerate(names):
         row_vals = [v for v in mat[i] if not (isinstance(v, float) and math.isnan(v))]
         final_mae = float(row_vals[-1]) if row_vals else None
-        best_mae = float(min(row_vals)) if row_vals else None
-        test_mae = float(mat[i][i]) if not (isinstance(mat[i][i], float) and math.isnan(mat[i][i])) else None
+        best_mae  = float(min(row_vals)) if row_vals else None
+        test_mae  = float(mat[i][i]) if not (isinstance(mat[i][i], float) and math.isnan(mat[i][i])) else None
         perf_rows.append({
             "task_idx": i+1,
             "task_name": ti,

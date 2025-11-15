@@ -54,8 +54,8 @@ class AS_SNN(BaseMethod):
         lambda_a: float = 2.5,
         gamma_ratio: float = 0.5,
         ema: float = 0.9,
-        penalty_mode: str = "l1",            # "l1" | "l2"
-        measure_at: Optional[str] = None,    # "modules" | "input" | "both"
+        penalty_mode: str = "l1",             # "l1" | "l2"
+        measure_at: Optional[str] = None,     # "modules" | "input" | "both"
         attach_to: Optional[str] = None,
         do_synaptic_scaling: bool = False,
         scale_clip: Union[float, Tuple[float, float], List[float]] = (0.5, 2.0),
@@ -92,9 +92,12 @@ class AS_SNN(BaseMethod):
             assert measure_at in ("modules", "input", "both")
             self.measure_at = measure_at
 
+        # Tag más informativo
         tag = "as-snn"
         tag += f"_gr_{self.gamma_ratio:g}"
         tag += f"_lam_{self.lambda_a:g}"
+        tag += f"_ema_{self.ema:g}"
+        tag += f"_{self.penalty_mode}"
         if self.attach_to: tag += f"_att_{self.attach_to}"
         if self.do_synaptic_scaling: tag += "_scale_on"
         if name_suffix: tag += f"_{name_suffix}"
@@ -176,12 +179,29 @@ class AS_SNN(BaseMethod):
         self._batch_idx += 1
         if self.activity_verbose and (self._batch_idx % max(1, self.activity_every)) == 0:
             try:
-                a_in_ema = None if self._alpha_in_ema is None else float(self._alpha_in_ema.item())
-                print(f"[AS-SNN] input_ema={a_in_ema} γ={self.gamma_ratio:.2f} λ={self.lambda_a:g} hooks={self._nhooks}")
+                if self.measure_at in ("input", "both"):
+                    a_in_ema = None if self._alpha_in_ema is None else float(self._alpha_in_ema.item())
+                    print(f"[AS-SNN] input_ema={a_in_ema} γ={self.gamma_ratio:.2f} λ={self.lambda_a:g} hooks={self._nhooks}")
+                if self.measure_at in ("modules", "both"):
+                    layer_means = []
+                    for st in self._layer_stats.values():
+                        ae = st.get("alpha_ema")
+                        if isinstance(ae, torch.Tensor) and ae.numel() > 0:
+                            layer_means.append(float(ae.mean().item()))
+                    layers_mean = (sum(layer_means)/len(layer_means)) if layer_means else None
+                    print(f"[AS-SNN] layers_ema_mean={layers_mean} γ={self.gamma_ratio:.2f} λ={self.lambda_a:g} hooks={self._nhooks}")
             except Exception:
                 pass
 
     def _make_forward_hook(self, name: str, mod: nn.Module):
+        # micro-optim: detectar out_ch una sola vez
+        out_ch = None
+        try:
+            if hasattr(mod, "weight") and isinstance(mod.weight, torch.Tensor):
+                out_ch = int(mod.weight.shape[0])
+        except Exception:
+            out_ch = None
+
         def _hook(module: nn.Module, inputs, output):
             y = _first_tensor(output) if not isinstance(output, torch.Tensor) else output
             if y is None:
@@ -191,15 +211,7 @@ class AS_SNN(BaseMethod):
             device = y.device
 
             # Reducción por-CANAL robusta
-            out_ch = None
-            try:
-                if hasattr(mod, "weight") and isinstance(mod.weight, torch.Tensor):
-                    out_ch = int(mod.weight.shape[0])
-            except Exception:
-                out_ch = None
-
             a_raw = self._as_float_unit(y)
-
             if out_ch is not None:
                 channel_axis = None
                 for ax, sz in enumerate(a_raw.shape):
@@ -224,7 +236,7 @@ class AS_SNN(BaseMethod):
             self._ensure_layer_entry(name, device, a_now.detach())
             st = self._layer_stats[name]
             for k in ("alpha_ema", "alpha_last"):
-                tk = st[k]  # type: ignore[index]
+                tk = st.get(k)  # type: ignore[index]
                 if isinstance(tk, torch.Tensor) and tk.device != device:
                     st[k] = tk.to(device=device, non_blocking=True)  # type: ignore[index]
 
@@ -237,7 +249,6 @@ class AS_SNN(BaseMethod):
             else:
                 gamma = torch.tensor(self.gamma_ratio, device=device, dtype=a_now.dtype)
                 pen = self.lambda_a * self._phi(a_now, gamma)
-
             self._batch_penalties.append(pen)
 
         return _hook
