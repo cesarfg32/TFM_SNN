@@ -8,8 +8,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.config import load_preset, build_task_list_for, build_components_for
+from src.config import load_preset
 from src.runner import run_continual
+from src.utils import build_task_list_for
+from src.utils_components import build_components_for
 
 def main():
     ap = argparse.ArgumentParser()
@@ -54,7 +56,7 @@ def main():
         cfg.setdefault("continual", {})["params"] = out
 
     # Componentes coherentes con el preset
-    tfm, make_loader_fn, make_model_fn = build_components_for(cfg, ROOT)
+    make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
 
     # Task list (override si pasas --tasks-file)
     if args.tasks_file and args.tasks_file.exists():

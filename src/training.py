@@ -13,7 +13,7 @@ from torch import nn, optim
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-from .utils import set_seeds
+from .utils import set_seeds, build_task_list_for
 # Helpers neutrales (y RE-EXPORT para compatibilidad con imports antiguos)
 from .nn_io import set_encode_runtime, _align_target_shape, _forward_with_cached_orientation
 
@@ -307,7 +307,6 @@ def train_supervised(
 
 if __name__ == "__main__":
     import argparse, json
-    from pathlib import Path
     # Importamos dentro para no romper usos como librería
     from .config import load_preset
     from .utils_components import build_components_for
@@ -325,6 +324,8 @@ if __name__ == "__main__":
     ap.add_argument("--config", required=True, help="Ruta al JSON con overrides (lo escribe el sweep)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    ROOT = Path(__file__).resolve().parents[1]
 
     cfg_in_path = Path(args.config)
     with cfg_in_path.open("r", encoding="utf-8") as f:
@@ -355,6 +356,32 @@ if __name__ == "__main__":
     else:
         task_name = str(cfg.get("data", {}).get("which_circuit", "circuito1"))
         task_list = [{"name": task_name}]
+
+    # Si faltan rutas (paths) en las tareas, complétalas a partir de tasks.json
+    if any("paths" not in t or not t.get("paths") for t in task_list):
+        try:
+            canonical, _ = build_task_list_for(cfg, ROOT)
+            canon_map = {t["name"]: dict(t.get("paths", {})) for t in canonical}
+        except Exception as e:  # pragma: no cover - solo al fallar tasks.json
+            canon_map = {}
+            canon_err = e
+        else:
+            canon_err = None
+
+        for t in task_list:
+            if "paths" in t and t["paths"]:
+                continue
+            name = t["name"]
+            if name not in canon_map:
+                msg = (
+                    f"No se pudieron resolver los splits para la tarea '{name}'."
+                    " Asegúrate de haber ejecutado la preparación offline "
+                    "(tasks.json) o pasa rutas explícitas en el sweep."
+                )
+                if canon_err is not None:
+                    msg += f" Detalle: {canon_err}"
+                raise RuntimeError(msg)
+            t["paths"] = canon_map[name]
 
     if args.dry_run:
         print("[DRY] config:", {

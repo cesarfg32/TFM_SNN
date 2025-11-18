@@ -4,8 +4,16 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 from typing import Any, Dict, Iterable, Tuple
-import torch
-from torch import nn
+
+try:
+    import torch
+    from torch import nn
+except ModuleNotFoundError as exc:  # pragma: no cover - entorno sin PyTorch
+    print(
+        "[SKIP] PyTorch no está instalado: esta prueba de humo requiere torch. "
+        "Instala torch/torchvision según tu CUDA o CPU para ejecutarla."
+    )
+    raise SystemExit(2) from exc
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))

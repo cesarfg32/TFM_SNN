@@ -326,11 +326,6 @@ def load_preset(
     )
 
 
-def load_preset_from(path: Union[str, os.PathLike], key: str) -> Dict[str, Any]:
-    """Azúcar sintáctico retrocompatible: load_preset(path, key)."""
-    return load_preset(path, key)
-
-
 def dump_cfg(cfg: Dict[str, Any]) -> str:
     try:
         return json.dumps(cfg, indent=2, ensure_ascii=False)

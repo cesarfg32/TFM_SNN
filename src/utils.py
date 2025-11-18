@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 import inspect
 import random
 import numpy as np
@@ -332,3 +334,116 @@ def build_make_loader_fn(root: Path, *,
         )
 
     return make_loader_fn
+
+
+# ---------------------------------------------------------------------
+# Resolución de tasks.json / tasks_balanced.json
+# ---------------------------------------------------------------------
+def _detect_runs(raw_root: Path) -> List[str]:
+    if not raw_root.exists():
+        return []
+    runs = []
+    for cand in sorted(raw_root.iterdir()):
+        if not cand.is_dir():
+            continue
+        try:
+            has_log = any(p.name == "driving_log.csv" for p in cand.rglob("driving_log.csv"))
+        except Exception:
+            has_log = False
+        if has_log:
+            runs.append(cand.name)
+    return runs
+
+
+def _resolve_tasks_candidate(name: Optional[str], proc_root: Path) -> Optional[Path]:
+    if not name:
+        return None
+    p = Path(name)
+    if not p.is_absolute():
+        p = proc_root / p
+    return p
+
+
+def build_task_list_for(
+    cfg_or_name: Union[str, os.PathLike, Dict[str, Any]],
+    root: Union[str, os.PathLike, None] = None,
+) -> Tuple[List[Dict[str, Any]], Path]:
+    """Devuelve (task_list, tasks_file) coherentes con un preset ya preparado."""
+    if root is None:
+        root_path = Path(__file__).resolve().parents[1]
+    else:
+        root_path = Path(root)
+
+    if isinstance(cfg_or_name, (str, os.PathLike)):
+        from .config import load_preset  # import local para evitar ciclos
+
+        cfg = load_preset(cfg_or_name)
+    else:
+        cfg = cfg_or_name
+
+    prep = dict(cfg.get("prep", {}) or {})
+    proc_root = root_path / "data" / "processed"
+    raw_root = root_path / "data" / "raw" / "udacity"
+
+    prefer_balanced = bool(prep.get("use_balanced_tasks", False))
+    tb_name = prep.get("tasks_balanced_file_name", "tasks_balanced.json")
+    t_name = prep.get("tasks_file_name", "tasks.json")
+    candidates = ([tb_name, t_name] if prefer_balanced else [t_name, tb_name])
+    candidate_paths = [
+        _resolve_tasks_candidate(name, proc_root) for name in candidates if name
+    ]
+    tasks_path = next((p for p in candidate_paths if p is not None and p.exists()), None)
+    if tasks_path is None:
+        # Usa la primera ruta candidata como referencia aunque no exista todavía
+        tasks_path = candidate_paths[0] if candidate_paths else (proc_root / t_name)
+
+    if tasks_path.exists():
+        data = json.loads(tasks_path.read_text(encoding="utf-8"))
+        order = data.get("tasks_order", [])
+        splits = data.get("splits", {})
+        task_list = []
+        for name in order:
+            paths = splits.get(name)
+            if not isinstance(paths, dict):
+                raise KeyError(f"El tasks.json carece de 'splits' para {name}")
+            task_list.append({"name": str(name), "paths": dict(paths)})
+        if not task_list:
+            raise RuntimeError(f"{tasks_path} no contiene tareas válidas")
+        return task_list, tasks_path
+
+    # Fallback: construye rutas basadas en los CSV estándar
+    runs = list(prep.get("runs") or [])
+    if not runs:
+        runs = _detect_runs(raw_root)
+    if not runs:
+        raise FileNotFoundError(
+            "No se encontraron runs para construir tasks_list. "
+            "Ejecuta la preparación offline o define prep.runs explícitamente."
+        )
+
+    task_list = []
+    for run in runs:
+        run_dir = proc_root / run
+        train_bal = run_dir / "train_balanced.csv"
+        train_std = run_dir / "train.csv"
+        train_path = train_bal if (prefer_balanced and train_bal.exists()) else train_std
+        val_path = run_dir / "val.csv"
+        test_path = run_dir / "test.csv"
+        missing = [p for p in (train_path, val_path, test_path) if not p.exists()]
+        if missing:
+            missing_str = ", ".join(str(p) for p in missing)
+            raise FileNotFoundError(
+                f"Faltan splits para {run}: {missing_str}. Ejecuta la preparación offline."
+            )
+        task_list.append(
+            {
+                "name": str(run),
+                "paths": {
+                    "train": str(train_path.resolve()),
+                    "val": str(val_path.resolve()),
+                    "test": str(test_path.resolve()),
+                },
+            }
+        )
+
+    return task_list, tasks_path
