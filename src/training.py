@@ -66,13 +66,40 @@ def train_supervised(
 
     use_amp = bool(cfg.amp and torch.cuda.is_available())
     # <<< CAMBIO CLAVE: elegimos dtype de autocast (BF16 si está soportado) >>>
-    dtype_autocast = (
-        torch.bfloat16
-        if (use_amp and torch.cuda.is_bf16_supported())
-        else torch.float16
-    )
+    # dtype_autocast = (
+    #     torch.bfloat16
+    #     if (use_amp and torch.cuda.is_bf16_supported())
+    #     else torch.float16
+    # )
+    # --- AMP: permitir override por env var (AMP_DTYPE=auto|fp16|bf16) ---
+    _prefer = os.environ.get("AMP_DTYPE", "auto").lower()
+    if _prefer == "fp16":
+        dtype_autocast = torch.float16
+    elif _prefer == "bf16":
+        dtype_autocast = torch.bfloat16 if use_amp else torch.float16
+    else:
+        # auto: BF16 si está soportado, si no FP16
+        dtype_autocast = (
+            torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+        )
 
-    opt = optim.Adam(model.parameters(), lr=cfg.lr)
+    # opt = optim.Adam(model.parameters(), lr=cfg.lr)
+    # --- Optimizer: AdamW fused si está disponible (PyTorch 2.x + CUDA) ---
+    wd = float(os.environ.get("WEIGHT_DECAY", "0.0"))
+    fused_pref = os.environ.get("OPT_FUSED", "1") == "1"
+
+    try:
+        opt = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=wd, fused=fused_pref)
+        # Nota: en algunas builds 'fused' no existe o se ignora; TypeError → fallback
+    except TypeError:
+        opt = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=wd)
+
+    if os.environ.get("OPT_LOG", "1") == "1":
+        # Log rápido para confirmar configuración real en runtime
+        _is_fused = getattr(opt, "fused", None)
+        print(f"[OPTIM] AdamW | fused={bool(_is_fused) if _is_fused is not None else fused_pref} | wd={wd}")
+
+
     scaler = GradScaler(enabled=use_amp)  # con BF16 no es necesario, pero es inocuo
 
     history = {"train_loss": [], "val_loss": [], "val_mae": [], "val_mse": []}

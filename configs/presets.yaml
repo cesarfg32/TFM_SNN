@@ -20,10 +20,10 @@ defaults: &defaults
 
     # Reproductibilidad / rendimiento (estable /dev/shm)
     seed: 42
-    num_workers: 8
+    num_workers: 6
     prefetch_factor: 2
     pin_memory: true
-    persistent_workers: false
+    persistent_workers: true
     pin_memory_device: "cuda"
 
     # Aumentos (ligeros por defecto)
