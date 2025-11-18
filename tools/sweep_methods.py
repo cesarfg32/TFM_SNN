@@ -7,7 +7,6 @@ Sweep de métodos (versión CL real):
 - Logs sin buffering (-u y PYTHONUNBUFFERED=1) propagados al subproceso.
 """
 from __future__ import annotations
-
 import os
 import sys
 import json
@@ -123,37 +122,46 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
 # ===============================
 # 7) Ejecución de un run (UN solo proceso recorre todas las tareas)
 # ===============================
-def run_one(exp: Dict[str, Any],
-            preset: str,
-            outdir: Path,
-            safe_loader: int,
-            no_amp: bool,
-            dry: bool) -> int:
-
+def run_one(
+    exp: Dict[str, Any],
+    preset: str,
+    outdir: Path,
+    safe_loader: int,
+    no_amp: bool,
+    dry: bool
+) -> int:
     method_name: str = exp.get("method", "naive")
     tag: str = exp.get("tag", f"{preset}_{method_name}")
-    params: Dict[str, Any] = exp.get("params", {})
 
-    # Config base que entiende src.training (CLI)
+    # params (mantenemos compat anterior sin cambiar nombres en el sweep)
+    params: Dict[str, Any] = (exp.get("params") or exp.get("method_kwargs") or {})
+
     ov = {
         "preset": preset,
         "naming": {"tag": tag},
         "method": {"name": method_name, **params},
-        # CL REAL: pasamos TODAS las tareas aquí
         "tasks": ["circuito1", "circuito2"],
     }
+
+    # safe dataloader (desde flag del CLI)
     ov = _deep_merge(ov, dataloader_overrides(safe_loader))
+
+    # AMP override por experimento y por flag global
+    if "amp" in exp:
+        ov = _deep_merge(ov, {"optim": {"amp": bool(exp["amp"])}})
     if no_amp:
         ov = _deep_merge(ov, {"optim": {"amp": False}})
 
     cfg_path = outdir / f"tmp_cfg_{tag}.json"
     _write_json(cfg_path, ov)
 
+    # Lanza el RUNNER (entrada única)
     cmd = [
-        sys.executable, "-u",  # sin buffering
-        "-m", "src.training",
+        sys.executable, "-u",
+        "-m", "src.runner",
         "--config", str(cfg_path),
     ]
+
     if dry:
         print("[DRY] CMD:", " ".join(cmd))
         return 0

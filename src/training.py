@@ -1,4 +1,3 @@
-# src/training.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import json
@@ -13,7 +12,7 @@ from torch import nn, optim
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-from .utils import set_seeds, build_task_list_for
+from .utils import set_seeds
 # Helpers neutrales (y RE-EXPORT para compatibilidad con imports antiguos)
 from .nn_io import set_encode_runtime, _align_target_shape, _forward_with_cached_orientation
 
@@ -65,12 +64,6 @@ def train_supervised(
     model = model.to(device)
 
     use_amp = bool(cfg.amp and torch.cuda.is_available())
-    # <<< CAMBIO CLAVE: elegimos dtype de autocast (BF16 si está soportado) >>>
-    # dtype_autocast = (
-    #     torch.bfloat16
-    #     if (use_amp and torch.cuda.is_bf16_supported())
-    #     else torch.float16
-    # )
     # --- AMP: permitir override por env var (AMP_DTYPE=auto|fp16|bf16) ---
     _prefer = os.environ.get("AMP_DTYPE", "auto").lower()
     if _prefer == "fp16":
@@ -78,27 +71,19 @@ def train_supervised(
     elif _prefer == "bf16":
         dtype_autocast = torch.bfloat16 if use_amp else torch.float16
     else:
-        # auto: BF16 si está soportado, si no FP16
-        dtype_autocast = (
-            torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
-        )
+        dtype_autocast = (torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16)
 
-    # opt = optim.Adam(model.parameters(), lr=cfg.lr)
     # --- Optimizer: AdamW fused si está disponible (PyTorch 2.x + CUDA) ---
     wd = float(os.environ.get("WEIGHT_DECAY", "0.0"))
     fused_pref = os.environ.get("OPT_FUSED", "1") == "1"
-
     try:
         opt = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=wd, fused=fused_pref)
-        # Nota: en algunas builds 'fused' no existe o se ignora; TypeError → fallback
     except TypeError:
         opt = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=wd)
 
     if os.environ.get("OPT_LOG", "1") == "1":
-        # Log rápido para confirmar configuración real en runtime
         _is_fused = getattr(opt, "fused", None)
         print(f"[OPTIM] AdamW | fused={bool(_is_fused) if _is_fused is not None else fused_pref} | wd={wd}")
-
 
     scaler = GradScaler(enabled=use_amp)  # con BF16 no es necesario, pero es inocuo
 
@@ -137,11 +122,11 @@ def train_supervised(
             # Mueve y a device (x lo mueve _forward_* si es necesario)
             y = y.to(device, non_blocking=True)
 
-            # <<< CAMBIO CLAVE: autocast (BF16 si disponible) cubre forward+loss; desactivamos AMP interno >>>
+            # autocast (BF16 si disponible) cubre forward+loss; desactivamos AMP interno
             with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
                 y_hat = _forward_with_cached_orientation(
                     model=model, x=x, y=y, device=device,
-                    use_amp=False,  # << evitamos doble autocast; usamos el nuestro
+                    use_amp=False,  # evitamos doble autocast; usamos el nuestro
                     phase_hint=phase_hint, phase="train"
                 )
                 # Alinea target y garantiza mismo dtype que y_hat
@@ -230,10 +215,10 @@ def train_supervised(
         with torch.no_grad():
             for x, y in val_loader:
                 y = y.to(device, non_blocking=True)
-                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):  # <<< idem BF16
+                with autocast(device_type="cuda", enabled=use_amp, dtype=dtype_autocast):
                     y_hat = _forward_with_cached_orientation(
                         model=model, x=x, y=y, device=device,
-                        use_amp=False,  # << evitamos doble autocast en val
+                        use_amp=False,  # evitamos doble autocast en val
                         phase_hint=phase_hint, phase="val"
                     )
                     y_aligned = _align_target_shape(y_hat, y).to(
@@ -304,103 +289,3 @@ def train_supervised(
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return history
-
-if __name__ == "__main__":
-    import argparse, json
-    # Importamos dentro para no romper usos como librería
-    from .config import load_preset
-    from .utils_components import build_components_for
-    from .runner import run_continual
-
-    def _deep_update(base: dict, overlay: dict) -> dict:
-        for k, v in (overlay or {}).items():
-            if isinstance(v, dict) and isinstance(base.get(k), dict):
-                _deep_update(base[k], v)
-            else:
-                base[k] = v
-        return base
-
-    ap = argparse.ArgumentParser(description="Entrenador CLI (compatible con sweep)")
-    ap.add_argument("--config", required=True, help="Ruta al JSON con overrides (lo escribe el sweep)")
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
-
-    ROOT = Path(__file__).resolve().parents[1]
-
-    cfg_in_path = Path(args.config)
-    with cfg_in_path.open("r", encoding="utf-8") as f:
-        cfg_in = json.load(f)
-
-    # 1) Partimos del preset declarado en el JSON del sweep
-    preset_name = str(cfg_in.get("preset", "fast"))
-    cfg = load_preset(preset_name)
-
-    # 2) Mezclamos overrides del sweep (naming, data.*, method, tasks, etc.)
-    _deep_update(cfg, cfg_in)
-
-    # 3) Mapear bloque "method" del sweep → sección esperada por runner (`continual`)
-    meth = (cfg_in.get("method") or {})
-    if isinstance(meth, dict):
-        mname = str(meth.get("name", cfg["continual"].get("method", "naive")))
-        mparams = {k: v for k, v in meth.items() if k != "name"}
-        cfg["continual"]["method"] = mname
-        cfg["continual"]["params"] = mparams
-
-    # 4) Selección de tareas:
-    #    - Preferimos lista 'tasks' (CL real: p.ej., ["circuito1","circuito2"])
-    #    - Fallback: data.which_circuit (modo antiguo, 1 tarea)
-    task_list = None
-    tasks_decl = cfg_in.get("tasks", None)
-    if isinstance(tasks_decl, list) and tasks_decl:
-        task_list = [{"name": str(t)} for t in tasks_decl]
-    else:
-        task_name = str(cfg.get("data", {}).get("which_circuit", "circuito1"))
-        task_list = [{"name": task_name}]
-
-    # Si faltan rutas (paths) en las tareas, complétalas a partir de tasks.json
-    if any("paths" not in t or not t.get("paths") for t in task_list):
-        try:
-            canonical, _ = build_task_list_for(cfg, ROOT)
-            canon_map = {t["name"]: dict(t.get("paths", {})) for t in canonical}
-        except Exception as e:  # pragma: no cover - solo al fallar tasks.json
-            canon_map = {}
-            canon_err = e
-        else:
-            canon_err = None
-
-        for t in task_list:
-            if "paths" in t and t["paths"]:
-                continue
-            name = t["name"]
-            if name not in canon_map:
-                msg = (
-                    f"No se pudieron resolver los splits para la tarea '{name}'."
-                    " Asegúrate de haber ejecutado la preparación offline "
-                    "(tasks.json) o pasa rutas explícitas en el sweep."
-                )
-                if canon_err is not None:
-                    msg += f" Detalle: {canon_err}"
-                raise RuntimeError(msg)
-            t["paths"] = canon_map[name]
-
-    if args.dry_run:
-        print("[DRY] config:", {
-            "preset": preset_name,
-            "tasks": [t["name"] for t in task_list],
-            "method": cfg["continual"]["method"],
-            "params": cfg["continual"].get("params", {}),
-        })
-        raise SystemExit(0)
-
-    # 5) Construir componentes y ejecutar (CL secuencial si hay múltiples tareas)
-    make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
-    run_continual(
-        task_list=task_list,
-        make_loader_fn=make_loader_fn,
-        make_model_fn=make_model_fn,
-        tfm=tfm,
-        cfg=cfg,
-        preset_name=preset_name,
-        out_root=Path("outputs"),
-        verbose=True,
-    )

@@ -320,7 +320,7 @@ def run_continual(
     _apply_log_section(method_obj, method.lower())
     if hasattr(method_obj, "methods"):
         try:
-            for sub in getattr(method_obj, "methods", []):   # <-- FIX aquí
+            for sub in getattr(method_obj, "methods", []):
                 base = str(getattr(sub, "name", "")).lower().split("+")[0].split("_")[0]
                 if base:
                     _apply_log_section(sub, base)
@@ -758,5 +758,108 @@ def reevaluate_only(
     verbose: bool = True,
 ) -> Path:
     # ... (tu cuerpo original sin cambios) ...
-    # Lo omitimos aquí por brevedad, ya que no tocamos esa parte.
     return Path(out_dir)
+
+# ---------------- CLI del runner ----------------
+from pathlib import Path as _Path
+import argparse as _argparse
+from .config import load_preset
+from .utils_components import build_components_for
+from .utils import build_task_list_for
+
+def _deep_update(base: dict, overlay: dict) -> dict:
+    for k, v in (overlay or {}).items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_update(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+def _normalize_tasks_decl(tasks_decl) -> List[dict]:
+    """
+    Acepta:
+      - None → fallback a which_circuit
+      - List[str] → [{"name": str}, ...]
+      - List[dict] con {"name": ..., "paths": {...}} → se respeta tal cual
+    """
+    norm: List[dict] = []
+    if not isinstance(tasks_decl, list):
+        return norm
+    for item in tasks_decl:
+        if isinstance(item, dict) and "name" in item:
+            norm.append({"name": str(item["name"]), **({"paths": item.get("paths")} if item.get("paths") else {})})
+        else:
+            norm.append({"name": str(item)})
+    return norm
+
+def run_from_config_dict(cfg_in: dict):
+    preset_name = str(cfg_in.get("preset", "fast"))
+
+    # Permite YAML alternativo sin duplicar nomenclatura
+    config_path = cfg_in.get("config_path", None)
+    if config_path:
+        cfg = load_preset(config_path, preset_name)
+    else:
+        cfg = load_preset(preset_name)
+
+    _deep_update(cfg, cfg_in)
+
+    # method block → continual
+    meth = (cfg_in.get("method") or {})
+    if isinstance(meth, dict):
+        mname = str(meth.get("name", cfg["continual"].get("method", "naive")))
+        mparams = {k: v for k, v in meth.items() if k != "name"}
+        cfg["continual"]["method"] = mname
+        cfg["continual"]["params"] = mparams
+
+    # tasks: lista explícita o fallback
+    tasks_decl = cfg_in.get("tasks", None)
+    task_list = _normalize_tasks_decl(tasks_decl)
+    if not task_list:
+        task_name = str(cfg.get("data", {}).get("which_circuit", "circuito1"))
+        task_list = [{"name": task_name}]
+
+    # completar paths desde tasks.json si faltan
+    if any("paths" not in t or not t.get("paths") for t in task_list):
+        canonical, _ = build_task_list_for(cfg, ROOT)
+        canon_map = {t["name"]: dict(t.get("paths", {})) for t in canonical}
+        for t in task_list:
+            if "paths" in t and t["paths"]:
+                continue
+            if t["name"] not in canon_map:
+                raise RuntimeError(f"Sin splits para '{t['name']}'. Prepara tasks.json o pasa rutas.")
+            t["paths"] = canon_map[t["name"]]
+
+    make_loader_fn, make_model_fn, tfm = build_components_for(cfg)
+    out_dir, _ = run_continual(
+        task_list=task_list,
+        make_loader_fn=make_loader_fn,
+        make_model_fn=make_model_fn,
+        tfm=tfm,
+        cfg=cfg,
+        preset_name=preset_name,
+        out_root=Path("outputs"),
+        verbose=True,
+    )
+    return out_dir
+
+def main(argv=None):
+    ap = _argparse.ArgumentParser(description="Runner CLI (lee --config y ejecuta run_continual)")
+    ap.add_argument("--config", required=True, help="Ruta JSON overrides (lo escribe el sweep)")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+
+    cfg_in = json.loads(_Path(args.config).read_text(encoding="utf-8"))
+    if args.dry_run:
+        meth = (cfg_in.get("method") or {})
+        print("[DRY] config:", {
+            "preset": cfg_in.get("preset"),
+            "tasks": cfg_in.get("tasks"),
+            "method": meth.get("name"),
+            "params": {k: v for k, v in meth.items() if k != "name"},
+        })
+        return
+    run_from_config_dict(cfg_in)
+
+if __name__ == "__main__":
+    main()

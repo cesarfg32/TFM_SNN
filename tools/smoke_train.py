@@ -1,4 +1,3 @@
-# tools/smoke_train.py
 # -*- coding: utf-8 -*-
 """
 Smoke test de entrenamiento sintético:
@@ -26,7 +25,6 @@ from torch.amp import autocast, GradScaler
 from src.models import MiniSNN
 from src.utils import set_seeds
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=50, help="Iteraciones de entrenamiento")
@@ -37,7 +35,6 @@ def main():
     args = parser.parse_args()
 
     set_seeds(args.seed)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Dispositivo:", device.type)
 
@@ -81,7 +78,6 @@ def main():
 
     elapsed = time.time() - t0
     print(f"OK: entrenamiento sintético completado en {elapsed:.2f}s, última loss={loss.item():.6f}")
-
 
 if __name__ == "__main__":
     main()
