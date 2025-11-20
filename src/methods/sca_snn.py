@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict
+import os
+
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+
 from .base import BaseMethod
 from src.nn_io import _forward_with_cached_orientation  # orientación consistente
+
 
 # ------------------------------------------------------------
 # Configuración SCA-lite
@@ -341,16 +346,68 @@ class SCA_SNN(BaseMethod):
         yTBN = (yTBN * m).contiguous()
         yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0)
 
+        # --- AIRBAG DE ACTIVACIÓN (opcional por env) ---
+        # Si SCA_MAX_ACT está definido (0<cap<1) y la fracción activa supera cap, subimos el umbral
+        try:
+            active = float(m.mean().item())
+        except Exception:
+            active = 0.0
+
+        cap = None
+        cap_env = os.getenv("SCA_MAX_ACT", None)
+        if cap_env is not None:
+            try:
+                cap = float(cap_env)
+            except Exception:
+                cap = None
+
+        if cap is not None and 0.0 < cap < 1.0 and active > cap:
+            with torch.no_grad():
+                Rn_det = torch.sigmoid(self._R.detach())
+                try:
+                    q = torch.quantile(Rn_det, 1.0 - cap)
+                    thr = max(thr, float(q.item()))
+                except Exception:
+                    # fallback prudente: sube un 10%
+                    thr = min(1.0 - 1e-6, thr * 1.10)
+
+            # Recalcula máscara y aplica
+            if self.cfg.soft_mask_temp > 0.0:
+                m = torch.sigmoid((Rn - thr) / max(1e-6, self.cfg.soft_mask_temp)).view(1, 1, N)
+            else:
+                m = (Rn > thr).to(yTBN.dtype).view(1, 1, N)
+
+            if m.device != yTBN.device:
+                m = m.to(yTBN.device, non_blocking=True)
+
+            yTBN = (yTBN * m).contiguous()
+            yTBN = torch.nan_to_num(yTBN, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Relee fracción activa tras el ajuste
+            try:
+                active = float(m.mean().item())
+            except Exception:
+                active = 0.0
+
+            # Último recurso: si aún queda por encima, escala salida
+            if active > cap:
+                scale = cap / max(active, 1e-6)
+                yTBN.mul_(scale)
+
+        # (Opcional) sincroniza para que los errores CUDA asíncronos salgan aquí
+        if os.getenv("SCA_SYNC", "0") == "1" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
         # --- LOG CONTROLADO ---
         if bool(getattr(self, "verbose", self.cfg.verbose)):
             self._step += 1
             every = max(10, int(getattr(self, "log_every", self.cfg.log_every)))
             if (self._step % every) == 0:
                 try:
-                    active = 100.0 * float(m.mean().item())
+                    active_pct = 100.0 * float(m.mean().item())
                     print(
                         f"[SCA] step={self._step} | {self._attached_name} | "
-                        f"sim_min={self._sim_min:.3f} | thr={thr:.3f} | act≈{active:.1f}%"
+                        f"sim_min={self._sim_min:.3f} | thr={thr:.3f} | act≈{active_pct:.1f}%"
                     )
                 except Exception:
                     pass

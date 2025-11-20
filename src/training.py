@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
 import json
 import time
 import os
@@ -64,6 +65,10 @@ def train_supervised(
     model = model.to(device)
 
     use_amp = bool(cfg.amp and torch.cuda.is_available())
+    # --- override rápido por env para DEBUG ---
+    if os.environ.get("TFM_AMP_OFF", "0") == "1":
+        use_amp = False
+
     # --- AMP: permitir override por env var (AMP_DTYPE=auto|fp16|bf16) ---
     _prefer = os.environ.get("AMP_DTYPE", "auto").lower()
     if _prefer == "fp16":
@@ -143,7 +148,6 @@ def train_supervised(
                         pen = p.to(device=y_hat.device, dtype=y_hat.dtype)
                     else:
                         pen = torch.tensor(float(p), device=y_hat.device, dtype=y_hat.dtype)
-
                 loss = loss_base + pen
 
             # Logging neutral opcional
@@ -187,6 +191,10 @@ def train_supervised(
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
+
+            # --- sincronización opcional por iteración (depuración de errores asíncronos) ---
+            if os.environ.get("SYNC_EACH_STEP", "0") == "1" and torch.cuda.is_available():
+                torch.cuda.synchronize()
 
             running += float(loss.detach().item())
 
@@ -274,7 +282,7 @@ def train_supervised(
         "epochs": cfg.epochs,
         "batch_size": cfg.batch_size,
         "lr": cfg.lr,
-        "amp": cfg.amp,
+        "amp": use_amp,
         "seed": cfg.seed,
         "elapsed_sec": elapsed,
         "device": str(device),
