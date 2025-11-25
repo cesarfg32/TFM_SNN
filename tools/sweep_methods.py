@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Sweep de métodos (versión CL real):
+"""Sweep de métodos (versión CL real):
 - Un método = UN solo proceso que recorre TODAS las tareas (circuito1 -> circuito2).
 - --safe-dataloader opcional para mitigar problemas de workers/WSL.
 - Logs sin buffering (-u y PYTHONUNBUFFERED=1) propagados al subproceso.
@@ -74,7 +73,7 @@ def _print_method(idx: int, total: int, method_name: str, tag: str, preset: str)
     print(f"\n=== [{idx}/{total}] {method_name} | tag={tag} | preset={preset} ===\n")
 
 # ===============================
-# 4) Carga del sweep
+# 4) Carga/expansión del sweep
 # ===============================
 def load_sweep(path: Path) -> List[Dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
@@ -86,6 +85,39 @@ def load_sweep(path: Path) -> List[Dict[str, Any]]:
     if not isinstance(exps, list):
         raise ValueError(f"Formato de sweep inválido en {path}")
     return exps
+
+def _deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(a)
+    for k, v in b.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+def _expand_by_seeds(exps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Permite usar: { "seeds":[42,777], "tag":"...", ... } en cada experimento."""
+    out: List[Dict[str, Any]] = []
+    for e in exps:
+        seeds = e.get("seeds", None)
+        if not seeds:
+            out.append(e)
+            continue
+        base_tag = e.get("tag", "")
+        for s in seeds:
+            e2 = json.loads(json.dumps(e))  # copia profunda
+            e2.pop("seeds", None)
+            # override de seed en data
+            ov = e2.get("overrides", {})
+            ov = _deep_merge(ov, {"data": {"seed": int(s)}})
+            e2["overrides"] = ov
+            # tag con sufijo de seed
+            if base_tag:
+                e2["tag"] = f"{base_tag}_s{s}"
+            else:
+                e2["tag"] = f"s{s}"
+            out.append(e2)
+    return out
 
 # ===============================
 # 5) Overrides de DataLoader
@@ -103,24 +135,7 @@ def dataloader_overrides(safe_flag: int) -> Dict[str, Any]:
     }
 
 # ===============================
-# 6) Merge/IO helpers
-# ===============================
-def _deep_merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(a)
-    for k, v in b.items():
-        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
-
-def _write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# ===============================
-# 7) Ejecución de un run (UN solo proceso recorre todas las tareas)
+# 6) Ejecución de un run (UN solo proceso recorre todas las tareas)
 # ===============================
 def run_one(
     exp: Dict[str, Any],
@@ -146,6 +161,10 @@ def run_one(
     # safe dataloader (desde flag del CLI)
     ov = _deep_merge(ov, dataloader_overrides(safe_loader))
 
+    # Overrides arbitrarios por experimento (NUEVO)
+    if "overrides" in exp:
+        ov = _deep_merge(ov, exp["overrides"])
+
     # AMP override por experimento y por flag global
     if "amp" in exp:
         ov = _deep_merge(ov, {"optim": {"amp": bool(exp["amp"])}})
@@ -153,7 +172,9 @@ def run_one(
         ov = _deep_merge(ov, {"optim": {"amp": False}})
 
     cfg_path = outdir / f"tmp_cfg_{tag}.json"
-    _write_json(cfg_path, ov)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    with cfg_path.open("w", encoding="utf-8") as f:
+        json.dump(ov, f, ensure_ascii=False, indent=2)
 
     # Lanza el RUNNER (entrada única)
     cmd = [
@@ -161,7 +182,6 @@ def run_one(
         "-m", "src.runner",
         "--config", str(cfg_path),
     ]
-
     if dry:
         print("[DRY] CMD:", " ".join(cmd))
         return 0
@@ -174,7 +194,7 @@ def run_one(
     return ret
 
 # ===============================
-# 8) Main
+# 7) Main
 # ===============================
 def main() -> int:
     args = build_argparser().parse_args()
@@ -182,6 +202,8 @@ def main() -> int:
     outdir = Path(args.outdir)
 
     exps = load_sweep(sweep_path)
+    exps = _expand_by_seeds(exps)   # <<--- NUEVO
+
     _print_header(len(exps), outdir)
 
     for i, exp in enumerate(exps, 1):

@@ -1,0 +1,18 @@
+{
+  "experiments": [
+
+    { "method": "as-snn", "tag": "tune_as_lam020_ema092", "params": { "lambda_a": 0.20, "gamma_ratio": 0.5, "ema": 0.92, "penalty_mode": "l1", "do_synaptic_scaling": true }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+
+    { "method": "sca-snn", "tag": "tune_sca_b048_bias0",  "params": { "num_bins": 50, "beta": 0.48, "soft_mask_temp": 0.5, "anchor_batches": 24, "bias": 0.0,  "flatten_spatial": true }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sca-snn", "tag": "tune_sca_b050_bias0",  "params": { "num_bins": 50, "beta": 0.50, "soft_mask_temp": 0.5, "anchor_batches": 24, "bias": 0.0,  "flatten_spatial": true }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sca-snn", "tag": "tune_sca_b052_bias0",  "params": { "num_bins": 50, "beta": 0.52, "soft_mask_temp": 0.5, "anchor_batches": 24, "bias": 0.0,  "flatten_spatial": true }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sca-snn", "tag": "tune_sca_b048_bias-002", "params": { "num_bins": 50, "beta": 0.48, "soft_mask_temp": 0.5, "anchor_batches": 24, "bias": -0.02, "flatten_spatial": true }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sca-snn", "tag": "tune_sca_b050_bias-002", "params": { "num_bins": 50, "beta": 0.50, "soft_mask_temp": 0.5, "anchor_batches": 24, "bias": -0.02, "flatten_spatial": true }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sca-snn", "tag": "tune_sca_b052_bias-002", "params": { "num_bins": 50, "beta": 0.52, "soft_mask_temp": 0.5, "anchor_batches": 24, "bias": -0.02, "flatten_spatial": true }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+
+    { "method": "sa-snn", "tag": "tune_sa_k011_vt115", "params": { "attach_to": "f6", "k": 0.11, "tau": 32, "vt_scale": 1.15, "th_min": 1.0, "th_max": 2.0, "p": 5000000, "assume_binary_spikes": false, "flatten_spatial": false }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sa-snn", "tag": "tune_sa_k011_vt120", "params": { "attach_to": "f6", "k": 0.11, "tau": 32, "vt_scale": 1.20, "th_min": 1.0, "th_max": 2.0, "p": 5000000, "assume_binary_spikes": false, "flatten_spatial": false }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sa-snn", "tag": "tune_sa_k013_vt115", "params": { "attach_to": "f6", "k": 0.13, "tau": 32, "vt_scale": 1.15, "th_min": 1.0, "th_max": 2.0, "p": 5000000, "assume_binary_spikes": false, "flatten_spatial": false }, "amp": 1, "overrides": { "data": { "seed": 42 } } },
+    { "method": "sa-snn", "tag": "tune_sa_k013_vt120", "params": { "attach_to": "f6", "k": 0.13, "tau": 32, "vt_scale": 1.20, "th_min": 1.0, "th_max": 2.0, "p": 5000000, "assume_binary_spikes": false, "flatten_spatial": false }, "amp": 1, "overrides": { "data": { "seed": 42 } } }
+  ]
+}
