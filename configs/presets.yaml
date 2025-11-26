@@ -1,7 +1,6 @@
 # =====================
 # PRESETS TFM — SNN/CL
 # =====================
-
 # ---- Bloque base (anclas) ----
 defaults: &defaults
   model: &defaults_model
@@ -76,8 +75,6 @@ defaults: &defaults
     es_patience: null
     es_min_delta: null
     batch_size: 160
-    compile: false
-    compile_mode: reduce-overhead
 
   # EWC por defecto salvo que se sobrescriba
   continual: &defaults_continual
@@ -95,11 +92,10 @@ defaults: &defaults
       measure_power_secs: 15
       log_level: "error"
 
-    # Puedes usar estas dos claves universales por método (gracias al alias):
     ewc:
       fisher_verbose: false
       verbose: false
-      every: 256   # si activas verbose, imprimirá cada 256 iters
+      every: 256   # si verbose activo
     rehearsal:
       buffer_verbose: false
       replay_verbose: false
@@ -118,7 +114,6 @@ defaults: &defaults
     tag: ""
 
 # ---- Presets ----
-
 fast:
   <<: *defaults
   data:
@@ -146,7 +141,6 @@ fast:
       measure_power_secs: 15
       log_level: "error"
 
-    # Puedes usar estas dos claves universales por método (gracias al alias):
     ewc:
       fisher_verbose: true
       verbose: true

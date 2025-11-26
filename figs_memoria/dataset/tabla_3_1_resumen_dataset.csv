@@ -1,0 +1,3 @@
+Circuito,Muestras_canonical,Train,Val,Test,Factor_expansion,Train_balanceado
+Circuito 1,11895,24981,5357,5347,3.0,True
+Circuito 2,5168,10854,2325,2325,3.0,True
