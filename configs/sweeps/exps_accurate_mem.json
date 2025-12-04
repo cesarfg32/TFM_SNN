@@ -2,10 +2,10 @@
   "experiments": [
     {
       "method": "rehearsal",
-      "tag": "std_reh_buf3000_r030_s42",
+      "tag": "accurate_reh_buf1000_r015_s42",
       "params": {
-        "buffer_size": 3000,
-        "replay_ratio": 0.30
+        "buffer_size": 1000,
+        "replay_ratio": 0.15
       },
       "amp": 1,
       "overrides": {
@@ -16,10 +16,10 @@
     },
     {
       "method": "rehearsal",
-      "tag": "std_reh_buf3000_r030_s87",
+      "tag": "accurate_reh_buf1000_r015_s87",
       "params": {
-        "buffer_size": 3000,
-        "replay_ratio": 0.30
+        "buffer_size": 1000,
+        "replay_ratio": 0.15
       },
       "amp": 1,
       "overrides": {
@@ -30,10 +30,10 @@
     },
     {
       "method": "rehearsal",
-      "tag": "std_reh_buf3000_r030_s777",
+      "tag": "accurate_reh_buf1000_r015_s777",
       "params": {
-        "buffer_size": 3000,
-        "replay_ratio": 0.30
+        "buffer_size": 1000,
+        "replay_ratio": 0.15
       },
       "amp": 1,
       "overrides": {
