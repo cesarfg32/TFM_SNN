@@ -1,0 +1,71 @@
+{
+  "experiments": [
+    {
+      "method": "sca-snn",
+      "tag": "best_sca_bins50_beta050_bias0_temp050_ab24_crop_06122025",
+      "params": {
+        "lambd": "1.0e9",
+        "fisher_batches": 1000,
+        "attach_to": "f6",
+        "flatten_spatial": false,
+        "num_bins": 50,
+        "anchor_batches": 24,
+        "beta": 0.5,
+        "bias": 0.0,
+        "soft_mask_temp": 0.5,
+        "habit_decay": 0.99,
+        "verbose": false,
+        "log_every": 65536
+      },
+      "amp": 1,
+      "overrides": {
+        "data": {
+          "seed": 42
+        }
+      }
+    },
+
+    {
+      "method": "sa-snn",
+      "tag": "best_sa_k013_vt120_crop_06122025",
+      "params": {
+        "attach_to": "f6",
+        "k": 0.13,
+        "tau": 32,
+        "vt_scale": 1.2,
+        "th_min": 1.0,
+        "th_max": 2.0,
+        "p": 5000000,
+        "assume_binary_spikes": false,
+        "flatten_spatial": false
+      },
+      "amp": 1,
+      "overrides": {
+        "data": {
+          "seed": 42
+        }
+      }
+    },
+
+    {
+      "method": "as-snn",
+      "tag": "best_as_gr050_lam020_ema090_crop_06122025",
+      "params": {
+        "gamma_ratio": 0.5,
+        "lambda_a": 0.2,
+        "ema": 0.9,
+        "measure_at": "input",
+        "penalty_mode": "l1",
+        "do_synaptic_scaling": true,
+        "activity_verbose": false,
+        "activity_every": 400
+      },
+      "amp": 1,
+      "overrides": {
+        "data": {
+          "seed": 42
+        }
+      }
+    }
+  ]
+}

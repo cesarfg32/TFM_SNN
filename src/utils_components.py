@@ -32,7 +32,8 @@ def build_components_for(cfg: dict) -> Tuple[Callable, Callable, ImageTransform]
         int(cfg["model"]["img_w"]),
         int(cfg["model"]["img_h"]),
         to_gray=bool(cfg["model"]["to_gray"]),
-        crop_top=None,
+        crop_top=cfg["model"].get("crop_top", 0) or None,
+        crop_bottom=cfg["model"].get("crop_bottom", 0) or None
     )
 
     # --- Loader factory base ---

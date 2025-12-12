@@ -7,17 +7,17 @@ defaults: &defaults
     name: pilotnet_snn
     img_w: 200
     img_h: 66
-    to_gray: false
-    crop_top: 50      # ← quitar cielo
-    crop_bottom: 20   # ← recortar algo de capó
+    to_gray: true
+    crop_top: 0      # ← quitar cielo
+    crop_bottom: 0   # ← recortar algo de capó
 
   data: &defaults_data
     # Codificación
     encoder: rate              # rate | latency | raw | image
     T: 10
     gain: 0.5
-    use_offline_spikes: true
-    encode_runtime: false
+    use_offline_spikes: false
+    encode_runtime: true
 
     # Reproductibilidad / rendimiento (estable /dev/shm)
     seed: 42
@@ -28,15 +28,7 @@ defaults: &defaults
     pin_memory_device: "cuda"
 
     # Aumentos (ligeros por defecto)
-    # aug_train: &aug_light
     aug_train: null
-    #   prob_hflip: 0.5
-    #   brightness: [0.95, 1.05]
-    #   contrast:   [0.95, 1.05]
-    #   saturation: [0.95, 1.05]
-    #   hue:        [-0.03, 0.03]
-    #   gamma: null
-    #   noise_std: 0.0
 
     # Balanceo online (desactivado por defecto)
     balance_online: false
@@ -47,8 +39,8 @@ defaults: &defaults
   prep: &defaults_prep
     runs: ["circuito1", "circuito2"]
     merge_subruns: true
-    use_left_right: false
-    steer_shift: 0.20
+    use_left_right: true
+    steer_shift: 0.2
     bins: 50
     train: 0.70
     val: 0.15
@@ -57,13 +49,13 @@ defaults: &defaults
     balance_offline:
       mode: images          # images | none
       target_per_bin: auto
-      cap_per_bin: 10000
+      cap_per_bin: 12000
       aug:
         prob_hflip: 0.0     # desactivar flips en offline
-        brightness: [0.95, 1.05]
-        contrast:   [0.95, 1.05]
-        saturation: [0.95, 1.05]
-        hue:        [-0.05, 0.05]
+        brightness: [0.8, 1.2]
+        contrast:   [0.8, 1.2]
+        saturation: [0.8, 1.2]
+        hue:        [-0.1, 0.1]
         gamma: null
         noise_std: 0.0
     tasks_file_name: tasks.json
@@ -108,10 +100,10 @@ defaults: &defaults
       every: 256
     sa-snn:
       verbose: false
-      every: 1024
+      every: 256
     sca-snn:
       verbose: false
-      every: 1024
+      every: 256
 
   naming: &defaults_naming
     tag: ""

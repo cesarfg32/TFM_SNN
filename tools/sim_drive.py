@@ -99,7 +99,6 @@ class PID:
 # ==============================================================================
 def main():
     ap = argparse.ArgumentParser("Servidor de inferencia para el Udacity Simulator")
-
     ap.add_argument(
         "--ckpt",
         required=True,
@@ -119,11 +118,12 @@ def main():
         help="Preset de configs/presets.yaml a usar como referencia",
     )
     ap.add_argument("--config", default=str(ROOT / "configs" / "presets.yaml"))
+
     ap.add_argument(
         "--crop-top",
         type=int,
-        default=0,
-        help="Recorte superior en píxeles antes del resize",
+        default=None,
+        help="Recorte superior en píxeles antes del resize (por defecto, el del preset)",
     )
 
     # overrides opcionales
@@ -136,6 +136,12 @@ def main():
     ap.add_argument("--gain", type=float, default=None)
     ap.add_argument("--img-w", type=int, default=None)
     ap.add_argument("--img-h", type=int, default=None)
+    ap.add_argument(
+        "--crop-bottom",
+        type=int,
+        default=None,
+        help="Recorte inferior en píxeles antes del resize (por defecto, el del preset)",
+    )
     ap.add_argument(
         "--rgb",
         action="store_true",
@@ -172,8 +178,19 @@ def main():
     H = int(args.img_h if args.img_h is not None else MODEL["img_h"])
     to_gray = not args.rgb if args.rgb else bool(MODEL["to_gray"])
 
+    preset_crop_top = int(MODEL.get("crop_top", 0) or 0)
+    preset_crop_bottom = int(MODEL.get("crop_bottom", 0) or 0)
+
+    crop_top = args.crop_top if args.crop_top is not None else preset_crop_top
+    crop_bottom = args.crop_bottom if args.crop_bottom is not None else preset_crop_bottom
+
     # --- Modelo / transform ---------------------------------------------------
-    tfm = ImageTransform(W, H, to_gray=to_gray, crop_top=args.crop_top)
+    tfm = ImageTransform(
+        W, H,
+        to_gray=to_gray,
+        crop_top=crop_top,
+        crop_bottom=crop_bottom,
+    )
     model = build_model(args.model_name, tfm, beta=0.9, threshold=0.5)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -191,8 +208,10 @@ def main():
 
     print(f"[sim] dispositivo={device} | AMP={'ON' if torch.cuda.is_available() else 'OFF'}")
     print(f"[sim] modelo={args.model_name} | {W}x{H} gray={to_gray} | enc={encoder} T={T} gain={gain}")
+    print(f"[sim] crop_top={crop_top} px | crop_bottom={crop_bottom} px")
     if args.crop_top:
         print(f"[sim] crop_top={args.crop_top} px")
+        
 
     # Encoder temporal runtime
     encode_runtime = make_encode_runtimer(encoder, T, gain)
@@ -246,9 +265,6 @@ def main():
         except Exception as e:
             print("[sim] ERROR decodificando imagen:", repr(e))
             return  # ignoramos este frame
-
-        if args.crop_top and args.crop_top > 0:
-            bgr = bgr[args.crop_top:, :, :]
 
         x_img = tfm(bgr).float()  # (C,H,W) en [0,1]
 

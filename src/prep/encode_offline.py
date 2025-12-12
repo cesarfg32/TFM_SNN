@@ -21,10 +21,19 @@ def _upsert_prep_manifest(manifest_path: Path, key: str, entry: dict) -> None:
     tmp.replace(manifest_path)
 
 
-def _imread_center_mixed(row, base_raw: Path, base_proc: Path, to_gray: bool, size_wh: tuple[int,int]) -> np.ndarray:
+def _imread_center_mixed(
+    row,
+    base_raw: Path,
+    base_proc: Path,
+    to_gray: bool,
+    size_wh: tuple[int, int],
+    crop_top: int = 0,
+    crop_bottom: int = 0,
+) -> np.ndarray:
     """Lee la imagen indicada en row['center'] resolviendo:
        - 'aug/train/...'  -> bajo processed/<run>
        - 'IMG/...'/otras  -> bajo raw/<run>
+       Aplica crop superior/inferior opcional y resize a (W,H).
        Devuelve HxW (gris) o HxWx3 (RGB) en float32 [0,1].
     """
     rel = str(row["center"]).replace("\\", "/").lstrip("/")
@@ -36,6 +45,16 @@ def _imread_center_mixed(row, base_raw: Path, base_proc: Path, to_gray: bool, si
     if img is None:
         raise FileNotFoundError(f"No se pudo leer: {p}")
 
+    # Crop top / bottom antes del resize
+    top = max(0, int(crop_top or 0))
+    bot = max(0, int(crop_bottom or 0))
+    if top > 0 or bot > 0:
+        h = img.shape[0]
+        start = min(top, h)
+        end = h - bot if bot > 0 else h
+        end = max(start + 1, end)
+        img = img[start:end, :, :]
+
     W, H = size_wh  # nota: en este módulo usamos (W,H)
     img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
 
@@ -46,6 +65,7 @@ def _imread_center_mixed(row, base_raw: Path, base_proc: Path, to_gray: bool, si
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)   # HxWx3
         img = img.astype(np.float32) / 255.0
     return img
+
 
 
 def _encode_rate(img01: np.ndarray, T: int, gain: float, rng: np.random.Generator) -> np.ndarray:
@@ -158,9 +178,12 @@ def encode_csv_to_h5(
     gain: float = 0.5,
     size_wh: tuple[int, int] = (200, 66),
     to_gray: bool = True,
+    crop_top: int = 0,
+    crop_bottom: int = 0,
     seed: int = 42,
     compression: str = "gzip",
 ) -> None:
+
     """Lee CSV (columna 'center', 'steering'), codifica frames y guarda H5 con layout oficial:
        - attrs: version=2, encoder, T, gain, size_wh, to_gray, channels
        - datasets: /spikes (N,T,H,W) ó (N,T,C,H,W), /steering (N,), /filenames (N,)
@@ -182,8 +205,15 @@ def encode_csv_to_h5(
         # Si vino un DataFrame, asumimos 'base_dir' como raw y usamos el mismo como fallback de proc
         proc_dir_for_csv = base_dir
 
-    first = _imread_center_mixed(df.iloc[0], base_raw=base_dir, base_proc=proc_dir_for_csv,
-                                to_gray=to_gray, size_wh=(W, H))
+    first = _imread_center_mixed(
+        df.iloc[0],
+        base_raw=base_dir,
+        base_proc=proc_dir_for_csv,
+        to_gray=to_gray,
+        size_wh=(W, H),
+        crop_top=crop_top,
+        crop_bottom=crop_bottom,
+    )
 
     channels = 1 if first.ndim == 2 else first.shape[2]
 
@@ -214,6 +244,8 @@ def encode_csv_to_h5(
         h5.attrs["gain"] = float(gain)
         h5.attrs["size_wh"] = np.asarray([W, H], dtype=np.int32)
         h5.attrs["to_gray"] = int(bool(to_gray))
+        h5.attrs["crop_top"] = int(crop_top)
+        h5.attrs["crop_bottom"] = int(crop_bottom)
         h5.attrs["channels"] = int(channels)
 
         # Datasets
@@ -229,8 +261,15 @@ def encode_csv_to_h5(
 
         # Escribir por lotes (aquí fila a fila para simplicidad y memoria acotada)
         for i, row in df.iterrows():
-            img01 = _imread_center_mixed(row, base_raw=base_dir, base_proc=proc_dir_for_csv,
-                             to_gray=to_gray, size_wh=(W, H))
+            img01 = _imread_center_mixed(
+                row,
+                base_raw=base_dir,
+                base_proc=proc_dir_for_csv,
+                to_gray=to_gray,
+                size_wh=(W, H),
+                crop_top=crop_top,
+                crop_bottom=crop_bottom,
+            )
             if encoder == "rate":
                 spk = _encode_rate(img01, T=T, gain=gain, rng=rng)
             elif encoder == "raw":
@@ -267,6 +306,8 @@ def encode_csv_to_h5(
         "gain": float(gain) if encoder == "rate" else 0.0,
         "size_wh": [int(W), int(H)],     # W,H (coherente con el resto del repo)
         "to_gray": bool(to_gray),
+        "crop_top": int(crop_top),
+        "crop_bottom": int(crop_bottom),
         "channels": int(channels),
         "seed": int(seed),
         "compression": str(compression),

@@ -1,3 +1,3 @@
 Circuito,Muestras_canonical,Train,Val,Test,Factor_expansion,Train_balanceado
-Circuito 1,11895,24981,5357,5347,3.0,True
-Circuito 2,5168,10854,2325,2325,3.0,True
+Circuito 1,30054,493943,4507,4512,16.735276502295868,True
+Circuito 2,55002,497573,8250,8253,9.346496491036689,True

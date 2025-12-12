@@ -230,25 +230,44 @@ def make_loaders_from_h5(
 # ---------------------------------------------------------------------
 # Selección de H5 por atributos (enc/T/gain/size/grayscale)
 # ---------------------------------------------------------------------
-def _pick_h5_by_attrs(base_proc: Path, split: str, *,
-                      encoder: str, T: int, gain: float, tfm: ImageTransform) -> Path:
+def _pick_h5_by_attrs(
+    base_proc: Path,
+    split: str,
+    *,
+    encoder: str,
+    T: int,
+    gain: float,
+    tfm: ImageTransform,
+) -> Path:
     import h5py
     want_enc  = str(encoder).lower()
     want_T    = int(T)
     want_gain = float(gain) if want_enc == "rate" else 0.0
     want_size = (int(tfm.w), int(tfm.h))
     want_gray = bool(getattr(tfm, "to_gray", True))
+    want_top  = int(getattr(tfm, "crop_top", 0) or 0)
+    want_bot  = int(getattr(tfm, "crop_bottom", 0) or 0)
 
     candidates = sorted(base_proc.glob(f"{split}_*.h5"))
     for f in candidates:
         try:
             with h5py.File(f, "r") as h5:
-                enc   = str(h5.attrs.get("encoder", "rate")).lower()
-                T_h   = int(h5.attrs.get("T", want_T))
-                size  = tuple(int(x) for x in h5.attrs.get("size_wh", want_size))
-                to_g  = bool(h5.attrs.get("to_gray", 1))
-                gain_h= float(h5.attrs.get("gain", 0.0))
-                ok = (enc == want_enc) and (T_h == want_T) and (size == want_size) and (to_g == want_gray)
+                enc    = str(h5.attrs.get("encoder", "rate")).lower()
+                T_h    = int(h5.attrs.get("T", want_T))
+                size   = tuple(int(x) for x in h5.attrs.get("size_wh", want_size))
+                to_g   = bool(h5.attrs.get("to_gray", 1))
+                gain_h = float(h5.attrs.get("gain", 0.0))
+                top_h  = int(h5.attrs.get("crop_top", 0))
+                bot_h  = int(h5.attrs.get("crop_bottom", 0))
+
+                ok = (
+                    enc == want_enc and
+                    T_h == want_T and
+                    size == want_size and
+                    to_g == want_gray and
+                    top_h == want_top and
+                    bot_h == want_bot
+                )
                 if enc == "rate":
                     ok = ok and (abs(gain_h - want_gain) < 1e-8)
                 if ok:
@@ -258,7 +277,8 @@ def _pick_h5_by_attrs(base_proc: Path, split: str, *,
     raise FileNotFoundError(
         f"No hay H5 compatible para split={split} en {base_proc}. "
         f"attrs requeridos: enc={want_enc}, T={want_T}, size={want_size}, "
-        f"to_gray={want_gray}, gain={want_gain} | Vistos: {[p.name for p in candidates]}"
+        f"to_gray={want_gray}, gain={want_gain}, crop_top={want_top}, crop_bottom={want_bot} "
+        f"| Vistos: {[p.name for p in candidates]}"
     )
 
 # ---------------------------------------------------------------------

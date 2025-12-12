@@ -46,24 +46,42 @@ from PIL import Image
 # -----------------------------
 class ImageTransform:
     """Transformación mínima para imágenes de Udacity.
+
     Args:
       w (int): ancho destino (p. ej. 160).
       h (int): alto destino (p. ej. 80).
       to_gray (bool): si True, salida en escala de grises (1 canal); si False, RGB (3 canales).
       crop_top (Optional[int]): recorta 'crop_top' px por arriba antes del resize.
+      crop_bottom (Optional[int]): recorta 'crop_bottom' px por abajo antes del resize.
     """
-    def __init__(self, w: int, h: int, to_gray: bool = True, crop_top: Optional[int] = None):
+    def __init__(
+        self,
+        w: int,
+        h: int,
+        to_gray: bool = True,
+        crop_top: Optional[int] = None,
+        crop_bottom: Optional[int] = None,
+    ):
         self.w = int(w)
         self.h = int(h)
         self.to_gray = bool(to_gray)
-        self.crop_top = crop_top
+        # Normalizamos a enteros ≥ 0
+        self.crop_top = int(crop_top) if crop_top is not None else 0
+        self.crop_bottom = int(crop_bottom) if crop_bottom is not None else 0
 
     def __call__(self, img_bgr: np.ndarray) -> torch.Tensor:
         if img_bgr is None:
             raise ValueError("Imagen inválida (None).")
-        # Crop superior
-        if isinstance(self.crop_top, int) and self.crop_top > 0:
-            img_bgr = img_bgr[self.crop_top:, ...]
+
+        # Crop superior/inferior
+        top = max(0, int(self.crop_top or 0))
+        bottom = max(0, int(self.crop_bottom or 0))
+        if top > 0 or bottom > 0:
+            h = img_bgr.shape[0]
+            start = min(top, h)          # no pasarse por arriba
+            end = h - bottom if bottom > 0 else h
+            end = max(start + 1, end)    # al menos 1 píxel de alto
+            img_bgr = img_bgr[start:end, ...]
 
         if _HAS_CV2:
             if self.to_gray:
@@ -86,7 +104,7 @@ class ImageTransform:
         if self.to_gray:
             if img_bgr.ndim == 3:
                 b, g, r = img_bgr[..., 0], img_bgr[..., 1], img_bgr[..., 2]
-                img = (0.114*b + 0.587*g + 0.299*r).astype(np.uint8)
+                img = (0.114 * b + 0.587 * g + 0.299 * r).astype(np.uint8)
             else:
                 img = img_bgr.astype(np.uint8)
             pil = Image.fromarray(img, mode="L")
@@ -172,7 +190,7 @@ class UdacityCSV(Dataset):
         self.base_dir = Path(base_dir)
         self.cfg = UdacityCSVConfig(encoder=encoder, T=int(T), gain=float(gain), camera=camera)
         self.aug = aug
-        self.tfm = tfm if tfm is not None else ImageTransform(200, 66, True, None)
+        self.tfm = tfm if tfm is not None else ImageTransform(200, 66, True, None, None)
         assert self.cfg.camera in ["center", "left", "right"], "camera debe ser center/left/right"
 
         df = pd.read_csv(self.csv_path)

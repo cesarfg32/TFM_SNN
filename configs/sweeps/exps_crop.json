@@ -1,0 +1,25 @@
+{
+  "experiments": [
+    {
+      "method": "sa-snn",
+      "tag": "best_sa_k013_vt120_crop_06122025",
+      "params": {
+        "attach_to": "f6",
+        "k": 0.13,
+        "tau": 32,
+        "vt_scale": 1.2,
+        "th_min": 1.0,
+        "th_max": 2.0,
+        "p": 5000000,
+        "assume_binary_spikes": false,
+        "flatten_spatial": false
+      },
+      "amp": 1,
+      "overrides": {
+        "data": {
+          "seed": 42
+        }
+      }
+    }
+  ]
+}
